@@ -16,7 +16,7 @@ st.set_page_config(page_title="老闆的專屬選股雷達", layout="wide")
 st.title("📊 專屬 AI 策略選股雷達 & 歷史回測中心 (🚀 旗艦版)")
 
 # ==========================================
-# 📡 函數區：抓取名單與歷史資料 (極速快取)
+# 📡 函數區：抓取名單與歷史資料
 # ==========================================
 @st.cache_data(ttl=86400)
 def get_all_tw_stocks():
@@ -43,6 +43,32 @@ def get_stock_history(stock_id, period="6mo"):
         pass
     return pd.DataFrame()
 
+# ⭐ 新增函數：抓取夜盤與美股關鍵數據
+@st.cache_data(ttl=3600, show_spinner=False) # 快取 1 小時
+def get_overnight_market_data():
+    tickers = {
+        '台積電 ADR (台股風向球)': 'TSM', 
+        '費城半導體 (科技硬體)': '^SOX', 
+        '納斯達克 (美股科技)': '^IXIC', 
+        '道瓊工業 (美股傳產)': '^DJI'
+    }
+    results = {}
+    for name, ticker in tickers.items():
+        try:
+            # 抓取近5天確保能跨越週末抓到最後一個交易日
+            df = yf.Ticker(ticker).history(period="5d")
+            if len(df) >= 2:
+                last_close = df['Close'].iloc[-1]
+                prev_close = df['Close'].iloc[-2]
+                pct_change = ((last_close - prev_close) / prev_close) * 100
+                results[name] = {
+                    "收盤價": round(last_close, 2), 
+                    "漲跌幅": round(pct_change, 2)
+                }
+        except:
+            pass
+    return results
+
 def get_stock_news(stock_name):
     query = urllib.parse.quote(f"{stock_name} 台灣 股票")
     url = f"https://news.google.com/rss/search?q={query}&hl=zh-TW&gl=TW&ceid=TW:zh-Hant"
@@ -63,7 +89,6 @@ def calculate_indicators(df, kd_days, macd_fast, macd_slow, bb_days, bb_std):
     df['K'] = df['RSV'].ewm(com=2, adjust=False).mean()
     df['D'] = df['K'].ewm(com=2, adjust=False).mean()
     exp1 = df['Close'].ewm(span=macd_fast, adjust=False).mean()
-    # 👇 這裡就是剛剛斷尾的地方，已經幫您修復補上 .mean() 了！
     exp2 = df['Close'].ewm(span=macd_slow, adjust=False).mean()
     df['MACD'] = exp1 - exp2
     df['Middle_BB'] = df['Close'].rolling(window=bb_days).mean()
@@ -102,9 +127,10 @@ bb_std = st.sidebar.number_input("標準差倍數", min_value=1.0, value=3.0, st
 filter_bb = st.sidebar.radio("布林通道位階：", ["不篩選", "📉 觸碰/跌破『下軌』", "➖ 站上『中軌』", "📈 突破『上軌』"])
 
 # ==========================================
-# 🚀 主畫面：三頁籤設計
+# 🚀 主畫面：四頁籤設計
 # ==========================================
-tab1, tab2, tab3 = st.tabs(["📊 第一步：策略選股雷達", "📰 第二步：AI 新聞深度解讀", "📈 第三步：歷史勝率回測引擎"])
+# ⭐ 新增第四個頁籤：晨間作戰會議
+tab1, tab2, tab3, tab4 = st.tabs(["📊 第一步：策略選股", "📰 第二步：AI 新聞解讀", "📈 第三步：回測引擎", "🌙 第四步：晨間作戰會議 (夜盤)"])
 
 # ------------------------------------------
 # 頁籤 1：選股雷達
@@ -169,87 +195,4 @@ with tab2:
                         client = OpenAI(api_key=ai_api_key)
                         res = client.chat.completions.create(model="gpt-4o-mini", messages=[{"role": "user", "content": prompt}])
                         st.markdown("### 📝 【GPT 深度分析報告】")
-                        st.write(res.choices[0].message.content)
-                    except Exception as e:
-                        st.error(f"❌ 分析失敗：{e}")
-            else:
-                st.warning("找不到新聞。")
-
-# ------------------------------------------
-# 頁籤 3：歷史勝率回測引擎 (⭐ 近 1 年實戰版)
-# ------------------------------------------
-with tab3:
-    st.subheader("⏱️ 策略時光機：近 1 年真實數據回測")
-    st.markdown("""
-    **【回測邏輯說明】**
-    * 🎯 **進場：** 嚴格遵守您左側設定的所有參數（KD、MACD、布林通道）。
-    * 🟢 **停利 (均值回歸)：** 買進後，當股價反彈碰到「布林中軌」即獲利了結。
-    * 🔴 **停損 (保護本金)：** 買進後，若帳面虧損達 10%，立刻停損出場。
-    """)
-    
-    target_stock_bt = st.text_input("輸入要回測的股票代號 (例如: 2330)：", "2330", key="bt_input")
-    
-    if st.button("⏳ 啟動 1 年歷史回測", type="primary"):
-        with st.spinner(f"正在向歷史資料庫調閱 {target_stock_bt} 過去 1 年的每一筆交易..."):
-            stock_id = f"{target_stock_bt}.TW" if len(target_stock_bt) == 4 else target_stock_bt
-            df_bt = get_stock_history(stock_id, period="1y")
-            
-            if df_bt.empty:
-                st.error("⚠️ 抓不到這檔股票的資料，可能是代號錯誤或上市未滿 1 年。")
-            else:
-                df_bt = calculate_indicators(df_bt.copy(), kd_days, macd_fast, macd_slow, bb_days, bb_std)
-                df_bt = df_bt.dropna() 
-                
-                trades = []
-                in_position = False
-                buy_price = 0
-                buy_date = None
-                
-                for date, row in df_bt.iterrows():
-                    if not in_position:
-                        vol_ok = (row['Volume'] / 1000) >= set_volume
-                        k_ok = k_range[0] <= row['K'] <= k_range[1]
-                        d_ok = d_range[0] <= row['D'] <= d_range[1]
-                        
-                        macd_ok = True
-                        if filter_macd == "🔴 大於 0 (紅柱)": macd_ok = row['MACD'] > 0
-                        elif filter_macd == "🟢 小於 0 (綠柱)": macd_ok = row['MACD'] < 0
-                        
-                        bb_ok = True
-                        if filter_bb == "📉 觸碰/跌破『下軌』": bb_ok = row['Close'] <= row['Lower_BB']
-                        elif filter_bb == "➖ 站上『中軌』": bb_ok = row['Close'] >= row['Middle_BB']
-                        elif filter_bb == "📈 突破『上軌』": bb_ok = row['Close'] >= row['Upper_BB']
-                        
-                        if vol_ok and k_ok and d_ok and macd_ok and bb_ok:
-                            in_position = True
-                            buy_price = row['Close']
-                            buy_date = date.strftime('%Y-%m-%d')
-                    else:
-                        if row['Close'] >= row['Middle_BB']: 
-                            ret = (row['Close'] - buy_price) / buy_price
-                            trades.append({'進場日': buy_date, '出場日': date.strftime('%Y-%m-%d'), '進場價': round(buy_price, 2), '出場價': round(row['Close'], 2), '報酬率': ret, '結果': '🟢 停利'})
-                            in_position = False
-                        elif row['Close'] <= buy_price * 0.9: 
-                            ret = (row['Close'] - buy_price) / buy_price
-                            trades.append({'進場日': buy_date, '出場日': date.strftime('%Y-%m-%d'), '進場價': round(buy_price, 2), '出場價': round(row['Close'], 2), '報酬率': ret, '結果': '🔴 停損'})
-                            in_position = False
-                
-                if len(trades) > 0:
-                    trades_df = pd.DataFrame(trades)
-                    total_trades = len(trades_df)
-                    winning_trades = len(trades_df[trades_df['報酬率'] > 0])
-                    win_rate = (winning_trades / total_trades) * 100
-                    avg_return = trades_df['報酬率'].mean() * 100
-                    
-                    st.success("✅ 回測計算完成！以下是您專屬策略的真實戰報：")
-                    
-                    col1, col2, col3 = st.columns(3)
-                    col1.metric("🎯 歷史真實勝率", f"{win_rate:.1f} %")
-                    col2.metric("💰 每次平均報酬率", f"{avg_return:.2f} %")
-                    col3.metric("🔄 過去 1 年觸發次數", f"{total_trades} 次")
-                    
-                    st.markdown("#### 📜 詳細交易對帳單")
-                    trades_df['報酬率'] = trades_df['報酬率'].apply(lambda x: f"{x*100:.2f}%")
-                    st.dataframe(trades_df, use_container_width=True)
-                else:
-                    st.warning("😅 在過去 1 年內，這檔股票【從來沒有】同時符合您左側設定的所有嚴格條件。建議您放寬左側參數再試一次！")
+                        st.write(res.
