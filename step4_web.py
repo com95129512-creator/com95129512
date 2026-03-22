@@ -7,13 +7,13 @@ import random
 import urllib3
 import xml.etree.ElementTree as ET
 import urllib.parse
-from openai import OpenAI # 🧠 新增：導入 OpenAI 大腦
+from openai import OpenAI 
 
 # 關閉不安全連線警告
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 st.set_page_config(page_title="老闆的專屬選股雷達", layout="wide")
-st.title("📊 專屬 AI 策略選股雷達 & 新聞分析中心")
+st.title("📊 專屬 AI 策略選股雷達 & 新聞分析中心 (⚡ 極速版)")
 
 # ==========================================
 # 📡 函數區：抓取全台股代號
@@ -40,6 +40,20 @@ def get_all_tw_stocks():
         return ["2330.TW", "2317.TW", "3231.TW", "2603.TW", "2308.TW"]
 
 # ==========================================
+# ⚡ 核心升級：雲端極速記憶體 (Cache)
+# ==========================================
+# ttl=43200 代表記憶體會保留 12 小時。一天只要等一次，之後全部秒殺！
+@st.cache_data(ttl=43200, show_spinner=False)
+def get_stock_history(stock_id):
+    try:
+        df = yf.Ticker(stock_id).history(period="6mo")
+        if not df.empty:
+            return df
+    except:
+        pass
+    return pd.DataFrame()
+
+# ==========================================
 # 📡 函數區：自動搜尋 Google 財經新聞
 # ==========================================
 def get_stock_news(stock_name):
@@ -49,7 +63,7 @@ def get_stock_news(stock_name):
         res = requests.get(url, verify=False, timeout=10)
         root = ET.fromstring(res.text)
         news_list = []
-        for item in root.findall('.//item')[:5]: # 抓最新 5 則
+        for item in root.findall('.//item')[:5]: 
             title = item.find('title').text
             pubDate = item.find('pubDate').text
             news_list.append(f"日期: {pubDate} | 標題: {title}")
@@ -78,7 +92,6 @@ def calculate_indicators(df, kd_days, macd_fast, macd_slow, bb_days, bb_std):
 # 側邊欄：控制台與 AI 密碼輸入
 # ==========================================
 st.sidebar.header("🔑 AI 投資長授權 (已切換至 GPT)")
-# 【修改重點 1】：提示文字改成 OpenAI
 ai_api_key = st.sidebar.text_input("請輸入 OpenAI API 金鑰 (sk-開頭)：", type="password")
 st.sidebar.markdown("---")
 
@@ -105,32 +118,35 @@ bb_std = st.sidebar.number_input("標準差倍數", min_value=1.0, value=3.0, st
 filter_bb = st.sidebar.radio("布林通道位階：", ["不篩選", "📉 觸碰/跌破『下軌』", "➖ 站上『中軌』", "📈 突破『上軌』"])
 
 # ==========================================
-# 🚀 主畫面：雙頁籤設計 (Tabs)
+# 🚀 主畫面：雙頁籤設計
 # ==========================================
 tab1, tab2 = st.tabs(["📊 第一步：策略選股雷達", "📰 第二步：AI 新聞深度解讀 (GPT版)"])
 
-# ------------------------------------------
-# 頁籤 1：選股雷達
-# ------------------------------------------
 with tab1:
     if st.button("🚀 套用新參數，開始全網掃描！", type="primary"):
         passed_stocks = []
-        st.info("🔄 正在向政府資料庫獲取最新台股名單...")
+        st.info("🔄 系統啟動中... (若為今日首次全網掃描，建立資料庫約需 10 分鐘；第二次起將啟動 3 秒極速掃描！)")
         all_stocks = get_all_tw_stocks()
         
         stock_database = random.sample(all_stocks, min(50, len(all_stocks))) if "測試模式" in scan_mode else all_stocks
         progress_bar = st.progress(0)
         status_text = st.empty()
         
+        # ⚡ 記錄開始時間，讓老闆看這速度有多狂！
+        start_time = time.time() 
+        
         for i, stock in enumerate(stock_database):
             progress_bar.progress((i + 1) / len(stock_database))
             status_text.text(f"📡 正在分析 {stock} ... ({i+1}/{len(stock_database)})")
             
             try:
-                df = yf.Ticker(stock).history(period="6mo")
+                # ⚡ 呼叫快取記憶體，而不是每次都去找 Yahoo
+                df = get_stock_history(stock)
                 if df.empty: continue
-                df = calculate_indicators(df, kd_days, macd_fast, macd_slow, bb_days, bb_std)
-                latest = df.iloc[-1]
+                
+                # 複製一份 DataFrame 避免修改到記憶體裡的原始資料
+                df_calc = calculate_indicators(df.copy(), kd_days, macd_fast, macd_slow, bb_days, bb_std)
+                latest = df_calc.iloc[-1]
                 
                 if (latest['Volume'] / 1000) < set_volume: continue
                 if not (k_range[0] <= latest['K'] <= k_range[1]): continue
@@ -149,23 +165,24 @@ with tab1:
             except:
                 pass
                 
-        status_text.text("✅ 全市場掃描完成！")
+        # 結算時間
+        end_time = time.time()
+        time_taken = round(end_time - start_time, 1)
+        
+        status_text.text(f"✅ 掃描完成！本次花費時間：{time_taken} 秒")
         if len(passed_stocks) > 0:
             st.dataframe(pd.DataFrame(passed_stocks), use_container_width=True)
-            st.success("💡 老闆，請記下您感興趣的『股票代號』，然後點擊上方的【第二步：AI 新聞深度解讀】頁籤！")
+            st.success("💡 記下感興趣的代號，前往【第二步：AI 新聞深度解讀】看看主力意圖！")
         else:
-            st.error("😅 沒有股票符合條件，請放寬左側標準。")
+            st.error("😅 沒有股票符合條件，請放寬左側標準 (更改參數後再次點擊，系統將瞬間完成掃描！)。")
 
-# ------------------------------------------
-# 頁籤 2：AI 新聞解讀 (GPT 引擎版)
-# ------------------------------------------
 with tab2:
     st.subheader("🤖 召喚 GPT 投資長：透視新聞背後的主力意圖")
     target_stock = st.text_input("請輸入要分析的股票代號 (例如: 2330, 3231)：", "3231")
     
     if st.button("🧠 搜尋新聞並開始 GPT 分析", type="primary"):
         if not ai_api_key.startswith("sk-"):
-            st.error("⚠️ 老闆，請確認您在左側輸入的是 OpenAI 的 API 金鑰 (通常是 sk- 開頭)！")
+            st.error("⚠️ 請確認您在左側輸入的是 OpenAI 的 API 金鑰 (sk- 開頭)！")
         else:
             with st.spinner(f"🌐 正在搜集【{target_stock}】的全網最新新聞..."):
                 news_data = get_stock_news(target_stock)
@@ -178,7 +195,6 @@ with tab2:
                     for n in news_data:
                         st.write(n)
                         
-                # 【修改重點 2】：呼叫 OpenAI 的語法
                 prompt = f"""
                 你是專業的台股操盤手與分析師。
                 請根據以下關於台灣股票【{target_stock}】的最新新聞標題，為老闆進行深度分析。
@@ -193,10 +209,7 @@ with tab2:
                 
                 with st.spinner("🤖 GPT 投資長正在瘋狂運算中，請稍候..."):
                     try:
-                        # 建立 OpenAI 客戶端
                         client = OpenAI(api_key=ai_api_key)
-                        
-                        # 呼叫 gpt-4o-mini 模型
                         response = client.chat.completions.create(
                             model="gpt-4o-mini",
                             messages=[
@@ -204,11 +217,9 @@ with tab2:
                                 {"role": "user", "content": prompt}
                             ]
                         )
-                        
                         st.markdown("---")
                         st.markdown("### 📝 【GPT 投資長 深度分析報告】")
-                        # 顯示 GPT 的回覆內容
                         st.write(response.choices[0].message.content)
                         
                     except Exception as e:
-                        st.error(f"❌ AI 分析失敗。請確認您的 OpenAI 帳號有綁定信用卡或有可用額度。錯誤訊息：{e}")
+                        st.error(f"❌ AI 分析失敗。請確認您的 OpenAI 帳號有綁定信用卡或可用額度。錯誤訊息：{e}")
