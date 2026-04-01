@@ -59,7 +59,8 @@ def get_all_tw_stocks():
     except:
         return ["2330.TW", "2317.TW", "3231.TW", "2603.TW", "2308.TW"]
 
-@st.cache_data(ttl=43200, show_spinner=False)
+# ⭐ 將記憶體縮短為 1 小時，確保盤中資料不會過期太久
+@st.cache_data(ttl=3600, show_spinner=False)
 def get_stock_history(stock_id, period="6mo"):
     try:
         df = yf.Ticker(stock_id).history(period=period)
@@ -96,6 +97,9 @@ def get_stock_news(stock_name, limit=5):
         return []
 
 def calculate_indicators(df, kd_days, macd_fast, macd_slow, bb_days, bb_std):
+    # ⭐ 強制轉換為整數，避免運算 Bug
+    kd_days, macd_fast, macd_slow, bb_days = int(kd_days), int(macd_fast), int(macd_slow), int(bb_days)
+    
     low_min = df['Low'].rolling(window=kd_days).min()
     high_max = df['High'].rolling(window=kd_days).max()
     df['RSV'] = 100 * ((df['Close'] - low_min) / (high_max - low_min))
@@ -109,7 +113,7 @@ def calculate_indicators(df, kd_days, macd_fast, macd_slow, bb_days, bb_std):
     return df
 
 # ==========================================
-# 側邊欄：控制台 (重新設計勾選邏輯)
+# 側邊欄：控制台
 # ==========================================
 st.sidebar.header("🔑 AI 投資長授權")
 ai_api_key = st.sidebar.text_input("輸入 OpenAI API 金鑰 (sk-開頭)：", type="password")
@@ -120,12 +124,18 @@ scan_mode = st.sidebar.radio("雷達強度：", ["🧪 快速測試模式 (50檔
 st.sidebar.markdown("---")
 
 st.sidebar.header("⚙️ 篩選條件開關")
-# ⭐ 新增勾選方塊，讓老闆決定哪些條件要生效
+
+# ⭐ 預設參數 (不管有沒有勾選，都給定一組健康的預設值，避免程式出錯)
+set_volume = 5000
+kd_val = 20; kd_days = 9
+macd_fast = 12; macd_slow = 26
+bb_days = 20; bb_std = 2.0
+
 use_vol = st.sidebar.checkbox("1. 成交量過濾", value=True)
 if use_vol:
     set_volume = st.sidebar.number_input("最低成交量 (張)", min_value=0, value=5000)
 
-use_kd_below = st.sidebar.checkbox("2. KD 低位過濾 (KD < 20)", value=False)
+use_kd_below = st.sidebar.checkbox("2. KD 低位過濾", value=False)
 if use_kd_below:
     kd_val = st.sidebar.slider("KD 門檻值 (需低於此值)", 0, 100, 20)
     kd_days = st.sidebar.number_input("KD 計算天數", value=9)
@@ -146,10 +156,19 @@ if use_bb_below_mid:
 tab1, tab2, tab3, tab4, tab5 = st.tabs(["📊 雷達掃描", "📰 個股新聞", "📈 歷史回測", "🌙 晨間會議", "💼 我的庫存股"])
 
 # ------------------------------------------
-# 1. 策略選股雷達 (套用勾選邏輯)
+# 1. 策略選股雷達
 # ------------------------------------------
 with tab1:
-    if st.button("🚀 開始執行篩選！", type="primary"):
+    # ⭐ 新增清除記憶體的機制
+    col_run, col_clear = st.columns([3, 1])
+    with col_run:
+        run_btn = st.button("🚀 開始執行篩選！", type="primary", use_container_width=True)
+    with col_clear:
+        if st.button("🔄 清除記憶體 (強制抓最新)", use_container_width=True):
+            st.cache_data.clear() # 清空所有暫存資料
+            st.success("✅ 記憶體已徹底清空！請重新點擊掃描按鈕。")
+
+    if run_btn:
         passed_stocks = []
         all_stocks = get_all_tw_stocks()
         stock_database = random.sample(all_stocks, min(50, len(all_stocks))) if "測試模式" in scan_mode else all_stocks
@@ -160,131 +179,12 @@ with tab1:
             df = get_stock_history(stock, "6mo")
             if df.empty: continue
             try:
-                # 即使沒勾選也需要先算好數據，以便篩選
-                df_calc = calculate_indicators(df.copy(), 
-                                               kd_days if 'kd_days' in locals() else 9, 
-                                               macd_fast if 'macd_fast' in locals() else 12, 
-                                               macd_slow if 'macd_slow' in locals() else 26, 
-                                               bb_days if 'bb_days' in locals() else 20, 
-                                               bb_std if 'bb_std' in locals() else 2.0)
+                # 無論如何都先計算指標，參數帶入預設值或使用者設定值
+                df_calc = calculate_indicators(df.copy(), kd_days, macd_fast, macd_slow, bb_days, bb_std)
                 latest = df_calc.iloc[-1]
                 
-                # ⭐ 核心篩選邏輯：只有勾選的才檢查
+                # 只有打勾的條件才會進行排除 (continue)
                 if use_vol and (latest['Volume'] / 1000) < set_volume: continue
                 if use_kd_below and (latest['K'] > kd_val or latest['D'] > kd_val): continue
                 if use_macd_below and latest['MACD'] >= 0: continue
-                if use_bb_below_mid and latest['Close'] >= latest['Middle_BB']: continue
-                
-                passed_stocks.append({"代號": stock.replace('.TW', '').replace('.TWO', ''), "收盤價": round(latest['Close'], 2)})
-            except:
-                pass
-        st.success("✅ 篩選完成！")
-        if passed_stocks: st.dataframe(pd.DataFrame(passed_stocks), use_container_width=True)
-        else: st.error("沒有股票同時符合您「勾選」的條件。")
-
-# ------------------------------------------
-# 2. AI 新聞解讀 
-# ------------------------------------------
-with tab2:
-    st.subheader("🤖 個股深度分析")
-    target_stock_news = st.text_input("輸入股票代號：", "3231", key="news_input")
-    if st.button("🧠 開始分析"):
-        if not ai_api_key.startswith("sk-"): st.error("請輸入 OpenAI 金鑰！")
-        else:
-            with st.spinner("🌐 搜集新聞中..."): news_data = get_stock_news(target_stock_news)
-            if news_data:
-                prompt = f"請分析【{target_stock_news}】新聞：1. 情緒 2. 主力意圖 3. 建議\n\n{chr(10).join(news_data)}"
-                try:
-                    res = OpenAI(api_key=ai_api_key).chat.completions.create(model="gpt-4o-mini", messages=[{"role": "user", "content": prompt}])
-                    st.write(res.choices[0].message.content)
-                except Exception as e: st.error(f"分析失敗：{e}")
-            else: st.warning("找不到新聞。")
-
-# ------------------------------------------
-# 3. 歷史勝率回測 (也同步套用勾選邏輯)
-# ------------------------------------------
-with tab3:
-    st.subheader("📈 真實數據回測")
-    target_stock_bt = st.text_input("輸入代號回測：", "2330", key="bt_input")
-    if st.button("⏳ 啟動回測"):
-        with st.spinner("調閱 1 年資料中..."):
-            stock_id = f"{target_stock_bt}.TW" if len(target_stock_bt) == 4 else target_stock_bt
-            df_bt = get_stock_history(stock_id, period="1y")
-            if df_bt.empty: st.error("抓不到資料。")
-            else:
-                df_bt = calculate_indicators(df_bt.copy(), 
-                                               kd_days if 'kd_days' in locals() else 9, 
-                                               macd_fast if 'macd_fast' in locals() else 12, 
-                                               macd_slow if 'macd_slow' in locals() else 26, 
-                                               bb_days if 'bb_days' in locals() else 20, 
-                                               bb_std if 'bb_std' in locals() else 2.0).dropna()
-                trades, in_position, buy_price = [], False, 0
-                for date, row in df_bt.iterrows():
-                    if not in_position:
-                        # ⭐ 進場檢查也套用勾選開關
-                        v_ok = (row['Volume']/1000) >= set_volume if use_vol else True
-                        k_ok = (row['K'] <= kd_val and row['D'] <= kd_val) if use_kd_below else True
-                        m_ok = row['MACD'] < 0 if use_macd_below else True
-                        b_ok = row['Close'] < row['Middle_BB'] if use_bb_below_mid else True
-                        
-                        if v_ok and k_ok and m_ok and b_ok:
-                            in_position, buy_price, buy_date = True, row['Close'], date.strftime('%Y-%m-%d')
-                    else:
-                        if row['Close'] >= row['Middle_BB'] or row['Close'] <= buy_price * 0.9: 
-                            trades.append({'進場': buy_date, '出場': date.strftime('%Y-%m-%d'), '報酬率': f"{((row['Close'] - buy_price) / buy_price)*100:.2f}%"})
-                            in_position = False
-                if trades: st.dataframe(pd.DataFrame(trades))
-                else: st.warning("這段時間內從未符合您的「勾選條件」。")
-
-with tab4:
-    st.subheader("🌅 晨間作戰分析")
-    if st.button("☕ 生成報告"):
-        if not ai_api_key.startswith("sk-"): st.error("請輸入金鑰！")
-        else:
-            with st.spinner("連線中..."): ov_data = get_overnight_market_data()
-            if ov_data:
-                st.write(ov_data)
-                prompt = f"根據數據預測台股開盤建議：\n{ov_data}"
-                try:
-                    res = OpenAI(api_key=ai_api_key).chat.completions.create(model="gpt-4o-mini", messages=[{"role": "user", "content": prompt}])
-                    st.write(res.choices[0].message.content)
-                except Exception as e: st.error(e)
-
-with tab5:
-    st.subheader("💼 我的庫存股")
-    if worksheet is None: st.error("⚠️ 雲端連線失敗！")
-    col1, col2 = st.columns(2)
-    with col1:
-        new_stock = st.text_input("➕ 新增股票")
-        if st.button("加入"):
-            if new_stock and new_stock not in st.session_state.my_portfolio:
-                if worksheet: worksheet.append_row([new_stock])
-                st.session_state.my_portfolio.append(new_stock)
-                st.rerun()
-    with col2:
-        del_stock = st.text_input("🗑️ 刪除股票")
-        if st.button("移除"):
-            if del_stock in st.session_state.my_portfolio:
-                if worksheet:
-                    cell = worksheet.find(del_stock)
-                    if cell: worksheet.delete_rows(cell.row)
-                st.session_state.my_portfolio.remove(del_stock)
-                st.rerun()
-    if st.session_state.my_portfolio:
-        portfolio_data = []
-        for stock in st.session_state.my_portfolio:
-            df = get_stock_history(f"{stock}.TW" if len(stock) == 4 else stock, "5d")
-            if not df.empty and len(df) >= 2:
-                last_price, prev_price = df['Close'].iloc[-1], df['Close'].iloc[-2]
-                portfolio_data.append({"代號": stock, "最新收盤價": round(last_price, 2), "漲跌幅(%)": round(((last_price - prev_price) / prev_price) * 100, 2)})
-        st.dataframe(pd.DataFrame(portfolio_data), use_container_width=True)
-        if st.button("🔥 一鍵診斷"):
-            if not ai_api_key.startswith("sk-"): st.error("請輸入金鑰！")
-            else:
-                all_news = []
-                for stock in st.session_state.my_portfolio: all_news.extend(get_stock_news(stock, limit=2))
-                prompt = f"庫存總體檢：\n{chr(10).join(all_news)}"
-                try:
-                    res = OpenAI(api_key=ai_api_key).chat.completions.create(model="gpt-4o-mini", messages=[{"role": "user", "content": prompt}])
-                    st.write(res.choices[0].message.content)
-                except Exception as e: st.error(e)
+                if use_bb_below_mid and latest['Close'] >= latest
