@@ -7,10 +7,10 @@ from openai import OpenAI
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 st.set_page_config(page_title="老闆的專屬選股雷達", layout="wide")
-st.title("📊 專屬 AI 策略選股雷達 & 庫存戰情室 (🚀 彈性參數版)")
+st.title("📊 專屬 AI 策略選股雷達 & 庫存戰情室 (🚀 抗封鎖精準版)")
 
 # ==========================================
-# 💾 雲端資料庫連線 (Google Sheets)
+# 💾 雲端資料庫連線
 # ==========================================
 @st.cache_resource
 def init_db():
@@ -51,13 +51,14 @@ def get_all_tw_stocks():
     except:
         return ["2330.TW", "2317.TW", "3231.TW", "2603.TW", "2308.TW"]
 
+# ⭐ 核心修復：拒絕快取空白資料，防止記憶體中毒
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_stock_history(stock_id, period="6mo"):
-    try:
-        df = yf.Ticker(stock_id).history(period=period)
-        if not df.empty: return df
-    except: pass
-    return pd.DataFrame()
+    df = yf.Ticker(stock_id).history(period=period)
+    # 如果抓不到資料，或是資料太少算不出均線，直接強制拋出錯誤，讓系統【不要】存入記憶體！
+    if df.empty or len(df) < 30:
+        raise Exception("Fetch failed or not enough data")
+    return df
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_overnight_market_data():
@@ -137,19 +138,28 @@ with tab1:
     col_run, col_clear = st.columns([3, 1])
     with col_run: run_btn = st.button("🚀 開始執行篩選！", type="primary", use_container_width=True)
     with col_clear:
-        if st.button("🔄 清除快取", use_container_width=True):
+        if st.button("🔄 清除快取記憶", use_container_width=True):
             st.cache_data.clear()
-            st.success("✅ 記憶體已清空！")
+            st.success("✅ 舊的錯誤記憶已徹底刪除！")
 
     if run_btn:
         passed_stocks = []
         all_stocks = get_all_tw_stocks()
         stock_database = random.sample(all_stocks, min(50, len(all_stocks))) if "測試模式" in scan_mode else all_stocks
         progress_bar = st.progress(0)
+        status_text = st.empty()
+        
         for i, stock in enumerate(stock_database):
             progress_bar.progress((i + 1) / len(stock_database))
-            df = get_stock_history(stock, "6mo")
-            if df.empty: continue
+            status_text.text(f"📡 正在掃描 {stock} ({i+1}/{len(stock_database)})...")
+            
+            try:
+                df = get_stock_history(stock, "6mo")
+            except:
+                # ⭐ 核心修復：如果被 Yahoo 阻擋，我們就稍微休息一下，不要硬衝
+                time.sleep(random.uniform(0.05, 0.1))
+                continue
+                
             try:
                 latest = calculate_indicators(df.copy(), kd_days, macd_fast, macd_slow, bb_days, bb_std).iloc[-1]
                 if use_vol and (latest['Volume'] / 1000) < set_volume: continue
@@ -159,9 +169,9 @@ with tab1:
                 passed_stocks.append({"代號": stock.replace('.TW', '').replace('.TWO', ''), "收盤價": round(latest['Close'], 2)})
             except: pass
         
-        st.success("✅ 篩選完成！")
+        status_text.text(f"✅ 掃描完成！共過濾 {len(stock_database)} 檔股票。")
         if passed_stocks: st.dataframe(pd.DataFrame(passed_stocks), use_container_width=True)
-        else: st.error("沒有股票符合條件。")
+        else: st.error("目前市場上沒有股票同時符合您「勾選」的條件，請嘗試放寬標準。")
 
 with tab2:
     st.subheader("🤖 個股深度分析")
@@ -184,9 +194,8 @@ with tab3:
     target_stock_bt = st.text_input("輸入代號回測：", "2330", key="bt_input")
     if st.button("⏳ 啟動回測"):
         with st.spinner("調閱 1 年資料..."):
-            df_bt = get_stock_history(f"{target_stock_bt}.TW" if len(target_stock_bt) == 4 else target_stock_bt, "1y")
-            if df_bt.empty: st.error("抓不到資料。")
-            else:
+            try:
+                df_bt = get_stock_history(f"{target_stock_bt}.TW" if len(target_stock_bt) == 4 else target_stock_bt, "1y")
                 df_bt = calculate_indicators(df_bt.copy(), kd_days, macd_fast, macd_slow, bb_days, bb_std).dropna()
                 trades, in_position, buy_price = [], False, 0
                 for date, row in df_bt.iterrows():
@@ -203,6 +212,8 @@ with tab3:
                             in_position = False
                 if trades: st.dataframe(pd.DataFrame(trades))
                 else: st.warning("從未符合條件。")
+            except:
+                st.error("抓不到資料，可能代號錯誤或網路連線中斷。")
 
 with tab4:
     st.subheader("🌅 晨間作戰分析")
@@ -241,11 +252,12 @@ with tab5:
     if st.session_state.my_portfolio:
         portfolio_data = []
         for stock in st.session_state.my_portfolio:
-            df = get_stock_history(f"{stock}.TW" if len(stock) == 4 else stock, "5d")
-            if not df.empty and len(df) >= 2:
+            try:
+                df = get_stock_history(f"{stock}.TW" if len(stock) == 4 else stock, "5d")
                 last_price, prev_price = df['Close'].iloc[-1], df['Close'].iloc[-2]
                 portfolio_data.append({"代號": stock, "最新收盤價": round(last_price, 2), "漲跌幅(%)": round(((last_price - prev_price)/prev_price)*100, 2)})
-        st.dataframe(pd.DataFrame(portfolio_data), use_container_width=True)
+            except: pass
+        if portfolio_data: st.dataframe(pd.DataFrame(portfolio_data), use_container_width=True)
         
         if st.button("🔥 一鍵診斷"):
             if not ai_api_key.startswith("sk-"): st.error("請輸入金鑰！")
