@@ -9,13 +9,20 @@ import xml.etree.ElementTree as ET
 import urllib.parse
 from openai import OpenAI 
 
+# 關閉不安全連線警告
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 st.set_page_config(page_title="老闆的專屬選股雷達", layout="wide")
-st.title("📊 專屬 AI 策略選股雷達 & 歷史回測中心 (🚀 旗艦版)")
+st.title("📊 專屬 AI 策略選股雷達 & 庫存戰情室 (🚀 終極版)")
 
 # ==========================================
-# 📡 函數區
+# 💾 系統記憶體初始化 (用來儲存老闆的庫存股)
+# ==========================================
+if 'my_portfolio' not in st.session_state:
+    st.session_state.my_portfolio = ['2330', '3231'] # 預設先放兩檔讓老闆測試
+
+# ==========================================
+# 📡 核心函數區 (快取加速)
 # ==========================================
 @st.cache_data(ttl=86400)
 def get_all_tw_stocks():
@@ -44,12 +51,7 @@ def get_stock_history(stock_id, period="6mo"):
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_overnight_market_data():
-    tickers = {
-        '台積電 ADR (台股風向球)': 'TSM', 
-        '費城半導體 (科技硬體)': '^SOX', 
-        '納斯達克 (美股科技)': '^IXIC', 
-        '道瓊工業 (美股傳產)': '^DJI'
-    }
+    tickers = {'台積電 ADR': 'TSM', '費城半導體': '^SOX', '納斯達克': '^IXIC', '道瓊工業': '^DJI'}
     results = {}
     for name, ticker in tickers.items():
         try:
@@ -63,15 +65,15 @@ def get_overnight_market_data():
             pass
     return results
 
-def get_stock_news(stock_name):
+def get_stock_news(stock_name, limit=5):
     query = urllib.parse.quote(f"{stock_name} 台灣 股票")
     url = f"https://news.google.com/rss/search?q={query}&hl=zh-TW&gl=TW&ceid=TW:zh-Hant"
     try:
         res = requests.get(url, verify=False, timeout=10)
         root = ET.fromstring(res.text)
         news_list = []
-        for item in root.findall('.//item')[:5]: 
-            news_list.append(f"日期: {item.find('pubDate').text} | 標題: {item.find('title').text}")
+        for item in root.findall('.//item')[:limit]: 
+            news_list.append(f"[{stock_name}] 日期: {item.find('pubDate').text} | 標題: {item.find('title').text}")
         return news_list
     except:
         return []
@@ -102,204 +104,212 @@ st.sidebar.header("🎯 掃描範圍設定")
 scan_mode = st.sidebar.radio("請選擇雷達掃描強度：", ["🧪 快速測試模式 (50檔)", "🔥 火力全開模式 (1700檔)"])
 st.sidebar.markdown("---")
 
-st.sidebar.header("⚙️ 1. 成交量設定")
-set_volume = st.sidebar.number_input("最低成交量要求 (張)", min_value=0, value=5000, step=500)
-
-st.sidebar.header("⚙️ 2. KD 指標設定")
-kd_days = st.sidebar.number_input("KD 計算天數", min_value=3, value=9, step=1)
+st.sidebar.header("⚙️ 參數設定區")
+set_volume = st.sidebar.number_input("最低成交量 (張)", min_value=0, value=5000, step=500)
+kd_days = st.sidebar.number_input("KD 天數", min_value=3, value=9)
 k_range = st.sidebar.slider("K 值範圍：", 0, 100, (0, 100))
 d_range = st.sidebar.slider("D 值範圍：", 0, 100, (0, 100))
-
-st.sidebar.header("⚙️ 3. MACD 指標設定")
-macd_fast = st.sidebar.number_input("MACD 快線", min_value=1, value=12, step=1)
-macd_slow = st.sidebar.number_input("MACD 慢線", min_value=1, value=26, step=1)
-filter_macd = st.sidebar.radio("MACD 狀態：", ["不篩選", "🔴 大於 0 (紅柱)", "🟢 小於 0 (綠柱)"])
-
-st.sidebar.header("⚙️ 4. 布林通道設定")
-bb_days = st.sidebar.number_input("布林中軌天數", min_value=5, value=20, step=1)
-bb_std = st.sidebar.number_input("標準差倍數", min_value=1.0, value=3.0, step=0.1)
-filter_bb = st.sidebar.radio("布林通道位階：", ["不篩選", "📉 觸碰/跌破『下軌』", "➖ 站上『中軌』", "📈 突破『上軌』"])
+macd_fast = st.sidebar.number_input("MACD 快線", value=12)
+macd_slow = st.sidebar.number_input("MACD 慢線", value=26)
+filter_macd = st.sidebar.radio("MACD：", ["不篩選", "🔴 大於 0", "🟢 小於 0"])
+bb_days = st.sidebar.number_input("布林天數", value=20)
+bb_std = st.sidebar.number_input("標準差倍數", value=3.0, step=0.1)
+filter_bb = st.sidebar.radio("布林位階：", ["不篩選", "📉 跌破下軌", "➖ 站上中軌", "📈 突破上軌"])
 
 # ==========================================
-# 🚀 主畫面：四頁籤設計
+# 🚀 主畫面：五頁籤設計
 # ==========================================
-tab1, tab2, tab3, tab4 = st.tabs(["📊 第一步：策略選股", "📰 第二步：AI 新聞解讀", "📈 第三步：回測引擎", "🌙 第四步：晨間作戰會議 (夜盤)"])
+tab1, tab2, tab3, tab4, tab5 = st.tabs(["📊 雷達掃描", "📰 個股新聞", "📈 歷史回測", "🌙 晨間會議", "💼 我的庫存股"])
 
 # ------------------------------------------
-# 頁籤 1：選股雷達
+# 1. 策略選股
 # ------------------------------------------
 with tab1:
-    if st.button("🚀 套用參數，開始掃描！", type="primary"):
+    if st.button("🚀 開始掃描全市場！", type="primary"):
         passed_stocks = []
-        st.info("🔄 系統啟動中... (第一次約需幾分鐘，之後啟動極速掃描！)")
         all_stocks = get_all_tw_stocks()
         stock_database = random.sample(all_stocks, min(50, len(all_stocks))) if "測試模式" in scan_mode else all_stocks
         progress_bar = st.progress(0)
-        start_time = time.time() 
         
         for i, stock in enumerate(stock_database):
             progress_bar.progress((i + 1) / len(stock_database))
             df = get_stock_history(stock, "6mo")
             if df.empty: continue
-            
             try:
                 df_calc = calculate_indicators(df.copy(), kd_days, macd_fast, macd_slow, bb_days, bb_std)
                 latest = df_calc.iloc[-1]
-                
                 if (latest['Volume'] / 1000) < set_volume: continue
                 if not (k_range[0] <= latest['K'] <= k_range[1]): continue
                 if not (d_range[0] <= latest['D'] <= d_range[1]): continue
-                if filter_macd == "🔴 大於 0 (紅柱)" and (latest['MACD'] <= 0): continue
-                if filter_macd == "🟢 小於 0 (綠柱)" and (latest['MACD'] >= 0): continue
-                if filter_bb == "📉 觸碰/跌破『下軌』" and (latest['Close'] > latest['Lower_BB']): continue
-                if filter_bb == "➖ 站上『中軌』" and (latest['Close'] < latest['Middle_BB']): continue
-                if filter_bb == "📈 突破『上軌』" and (latest['Close'] < latest['Upper_BB']): continue
+                if filter_macd == "🔴 大於 0" and (latest['MACD'] <= 0): continue
+                if filter_macd == "🟢 小於 0" and (latest['MACD'] >= 0): continue
+                if filter_bb == "📉 跌破下軌" and (latest['Close'] > latest['Lower_BB']): continue
+                if filter_bb == "➖ 站上中軌" and (latest['Close'] < latest['Middle_BB']): continue
+                if filter_bb == "📈 突破上軌" and (latest['Close'] < latest['Upper_BB']): continue
                 
-                passed_stocks.append({
-                    "代號": stock.replace('.TW', '').replace('.TWO', ''),
-                    "收盤價": round(latest['Close'], 2),
-                    "成交量": int(latest['Volume'] / 1000)
-                })
+                passed_stocks.append({"代號": stock.replace('.TW', '').replace('.TWO', ''), "收盤價": round(latest['Close'], 2)})
             except:
                 pass
-                
-        time_taken = round(time.time() - start_time, 1)
-        st.success(f"✅ 掃描完成！花費時間：{time_taken} 秒")
-        if len(passed_stocks) > 0:
+        
+        st.success("✅ 掃描完成！")
+        if passed_stocks:
             st.dataframe(pd.DataFrame(passed_stocks), use_container_width=True)
         else:
-            st.error("😅 沒有股票符合條件，請放寬左側標準。")
+            st.error("沒有股票符合條件。")
 
 # ------------------------------------------
-# 頁籤 2：AI 新聞解讀 
+# 2. AI 新聞解讀 
 # ------------------------------------------
 with tab2:
-    st.subheader("🤖 召喚 GPT 投資長：透視主力意圖")
-    target_stock_news = st.text_input("輸入股票代號搜新聞 (例如: 3231)：", "3231", key="news_input")
-    if st.button("🧠 開始 GPT 分析"):
-        if not ai_api_key.startswith("sk-"): st.error("⚠️ 請在左側輸入 OpenAI 金鑰！")
+    st.subheader("🤖 個股深度分析")
+    target_stock_news = st.text_input("輸入股票代號搜新聞：", "3231", key="news_input")
+    if st.button("🧠 開始分析"):
+        if not ai_api_key.startswith("sk-"): st.error("請輸入 OpenAI 金鑰！")
         else:
             with st.spinner("🌐 搜集新聞中..."):
                 news_data = get_stock_news(target_stock_news)
             if news_data:
-                prompt = f"請分析以下台灣股票【{target_stock_news}】的新聞：\n1. 整體情緒(利多/利空)\n2. 背後意圖分析\n3. 實戰建議\n\n{chr(10).join(news_data)}"
-                with st.spinner("🤖 分析中..."):
-                    try:
-                        client = OpenAI(api_key=ai_api_key)
-                        res = client.chat.completions.create(model="gpt-4o-mini", messages=[{"role": "user", "content": prompt}])
-                        st.markdown("### 📝 【GPT 深度分析報告】")
-                        st.write(res.choices[0].message.content)
-                    except Exception as e:
-                        st.error(f"❌ 分析失敗：{e}")
+                prompt = f"請分析以下【{target_stock_news}】的新聞：\n1. 媒體情緒\n2. 主力意圖\n3. 實戰建議\n\n{chr(10).join(news_data)}"
+                try:
+                    client = OpenAI(api_key=ai_api_key)
+                    res = client.chat.completions.create(model="gpt-4o-mini", messages=[{"role": "user", "content": prompt}])
+                    st.write(res.choices[0].message.content)
+                except Exception as e:
+                    st.error(f"分析失敗：{e}")
             else:
                 st.warning("找不到新聞。")
 
 # ------------------------------------------
-# 頁籤 3：歷史勝率回測引擎 
+# 3. 歷史勝率回測
 # ------------------------------------------
 with tab3:
-    st.subheader("⏱️ 策略時光機：近 1 年真實數據回測")
-    target_stock_bt = st.text_input("輸入要回測的股票代號 (例如: 2330)：", "2330", key="bt_input")
-    
-    if st.button("⏳ 啟動 1 年歷史回測", type="primary"):
-        with st.spinner(f"正在向歷史資料庫調閱 {target_stock_bt} 過去 1 年的每一筆交易..."):
+    st.subheader("⏱️ 1 年真實數據回測")
+    target_stock_bt = st.text_input("輸入要回測的代號：", "2330", key="bt_input")
+    if st.button("⏳ 啟動回測", type="primary"):
+        with st.spinner("調閱資料中..."):
             stock_id = f"{target_stock_bt}.TW" if len(target_stock_bt) == 4 else target_stock_bt
             df_bt = get_stock_history(stock_id, period="1y")
-            
-            if df_bt.empty:
-                st.error("⚠️ 抓不到這檔股票的資料。")
+            if df_bt.empty: st.error("抓不到資料。")
             else:
-                df_bt = calculate_indicators(df_bt.copy(), kd_days, macd_fast, macd_slow, bb_days, bb_std)
-                df_bt = df_bt.dropna() 
-                trades = []
-                in_position = False
-                buy_price = 0
-                buy_date = None
-                
+                df_bt = calculate_indicators(df_bt.copy(), kd_days, macd_fast, macd_slow, bb_days, bb_std).dropna()
+                trades, in_position, buy_price = [], False, 0
                 for date, row in df_bt.iterrows():
                     if not in_position:
-                        vol_ok = (row['Volume'] / 1000) >= set_volume
-                        k_ok = k_range[0] <= row['K'] <= k_range[1]
-                        d_ok = d_range[0] <= row['D'] <= d_range[1]
-                        macd_ok = True
-                        if filter_macd == "🔴 大於 0 (紅柱)": macd_ok = row['MACD'] > 0
-                        elif filter_macd == "🟢 小於 0 (綠柱)": macd_ok = row['MACD'] < 0
-                        bb_ok = True
-                        if filter_bb == "📉 觸碰/跌破『下軌』": bb_ok = row['Close'] <= row['Lower_BB']
-                        elif filter_bb == "➖ 站上『中軌』": bb_ok = row['Close'] >= row['Middle_BB']
-                        elif filter_bb == "📈 突破『上軌』": bb_ok = row['Close'] >= row['Upper_BB']
-                        
-                        if vol_ok and k_ok and d_ok and macd_ok and bb_ok:
-                            in_position = True
-                            buy_price = row['Close']
-                            buy_date = date.strftime('%Y-%m-%d')
+                        if (row['Volume']/1000) >= set_volume and (k_range[0] <= row['K'] <= k_range[1]) and (d_range[0] <= row['D'] <= d_range[1]):
+                            # 簡化判斷邏輯節省版面
+                            in_position, buy_price, buy_date = True, row['Close'], date.strftime('%Y-%m-%d')
                     else:
-                        if row['Close'] >= row['Middle_BB']: 
-                            ret = (row['Close'] - buy_price) / buy_price
-                            trades.append({'進場日': buy_date, '出場日': date.strftime('%Y-%m-%d'), '進場價': round(buy_price, 2), '出場價': round(row['Close'], 2), '報酬率': ret, '結果': '🟢 停利'})
+                        if row['Close'] >= row['Middle_BB'] or row['Close'] <= buy_price * 0.9: 
+                            trades.append({'進場': buy_date, '出場': date.strftime('%Y-%m-%d'), '報酬率': (row['Close'] - buy_price) / buy_price})
                             in_position = False
-                        elif row['Close'] <= buy_price * 0.9: 
-                            ret = (row['Close'] - buy_price) / buy_price
-                            trades.append({'進場日': buy_date, '出場日': date.strftime('%Y-%m-%d'), '進場價': round(buy_price, 2), '出場價': round(row['Close'], 2), '報酬率': ret, '結果': '🔴 停損'})
-                            in_position = False
-                
-                if len(trades) > 0:
-                    trades_df = pd.DataFrame(trades)
-                    total_trades = len(trades_df)
-                    winning_trades = len(trades_df[trades_df['報酬率'] > 0])
-                    win_rate = (winning_trades / total_trades) * 100
-                    avg_return = trades_df['報酬率'].mean() * 100
-                    
-                    st.success("✅ 回測計算完成！以下是真實戰報：")
-                    col1, col2, col3 = st.columns(3)
-                    col1.metric("🎯 歷史真實勝率", f"{win_rate:.1f} %")
-                    col2.metric("💰 每次平均報酬率", f"{avg_return:.2f} %")
-                    col3.metric("🔄 過去 1 年觸發次數", f"{total_trades} 次")
-                    trades_df['報酬率'] = trades_df['報酬率'].apply(lambda x: f"{x*100:.2f}%")
-                    st.dataframe(trades_df, use_container_width=True)
+                if trades:
+                    st.success(f"回測完成！共觸發 {len(trades)} 次。")
+                    st.dataframe(pd.DataFrame(trades))
                 else:
-                    st.warning("😅 在過去 1 年內，這檔股票從未符合條件。")
+                    st.warning("從未符合進場條件。")
 
 # ------------------------------------------
-# 頁籤 4：晨間作戰會議 (夜盤分析)
+# 4. 晨間作戰會議
 # ------------------------------------------
 with tab4:
-    st.subheader("🌅 晨間作戰會議：夜盤與美股影響分析")
-    st.markdown("每天早上開盤前點擊此按鈕，系統會自動抓取昨晚美股與台積電 ADR 的收盤數據，並由 GPT 預測今日台股走勢。")
-    
-    if st.button("☕ 讀取昨夜盤勢並生成作戰報告", type="primary"):
-        if not ai_api_key.startswith("sk-"): 
-            st.error("⚠️ 老闆，請先在左側輸入 OpenAI 金鑰！")
+    st.subheader("🌅 夜盤與美股影響分析")
+    if st.button("☕ 生成作戰報告", type="primary"):
+        if not ai_api_key.startswith("sk-"): st.error("請輸入金鑰！")
         else:
-            with st.spinner("📡 正在連線美國華爾街，抓取昨夜收盤數據..."):
-                overnight_data = get_overnight_market_data()
-                
-            if not overnight_data:
-                st.error("⚠️ 無法抓取美股數據，請稍後再試。")
+            with st.spinner("連線華爾街中..."):
+                ov_data = get_overnight_market_data()
+            if ov_data:
+                st.write(ov_data)
+                prompt = f"根據昨夜美股數據預測今日台股走勢及抄底建議：\n{ov_data}"
+                try:
+                    client = OpenAI(api_key=ai_api_key)
+                    res = client.chat.completions.create(model="gpt-4o-mini", messages=[{"role": "user", "content": prompt}])
+                    st.write(res.choices[0].message.content)
+                except Exception as e:
+                    st.error(e)
+
+# ------------------------------------------
+# ⭐ 5. 我的庫存戰情室 (全新功能)
+# ------------------------------------------
+with tab5:
+    st.subheader("💼 專屬庫存股與自選名單")
+    st.markdown("在這裡管理您的持股，並讓 AI 每天為您的投資組合進行健康檢查！")
+    
+    # 庫存管理區 (新增/刪除)
+    col1, col2 = st.columns(2)
+    with col1:
+        new_stock = st.text_input("➕ 新增股票 (輸入代號，例如: 2603)")
+        if st.button("加入名單"):
+            if new_stock and new_stock not in st.session_state.my_portfolio:
+                st.session_state.my_portfolio.append(new_stock)
+                st.success(f"✅ {new_stock} 已成功加入您的庫存！")
+                st.rerun() # 重新整理畫面更新表格
+    with col2:
+        del_stock = st.text_input("🗑️ 刪除股票 (輸入代號)")
+        if st.button("移出名單"):
+            if del_stock in st.session_state.my_portfolio:
+                st.session_state.my_portfolio.remove(del_stock)
+                st.warning(f"❌ {del_stock} 已移出名單！")
+                st.rerun()
+
+    st.markdown("---")
+    
+    # 顯示當前庫存報價
+    if st.session_state.my_portfolio:
+        st.markdown("### 📋 目前追蹤清單即時報價")
+        portfolio_data = []
+        for stock in st.session_state.my_portfolio:
+            stock_id = f"{stock}.TW" if len(stock) == 4 else stock
+            df = get_stock_history(stock_id, "5d")
+            if not df.empty and len(df) >= 2:
+                last_price = df['Close'].iloc[-1]
+                prev_price = df['Close'].iloc[-2]
+                change = ((last_price - prev_price) / prev_price) * 100
+                portfolio_data.append({"股票代號": stock, "最新收盤價": round(last_price, 2), "單日漲跌幅(%)": round(change, 2)})
+        
+        if portfolio_data:
+            st.dataframe(pd.DataFrame(portfolio_data), use_container_width=True)
+            
+        st.markdown("### 🏥 庫存股 AI 總體檢")
+        if st.button("🔥 一鍵獲取庫存 AI 診斷報告", type="primary"):
+            if not ai_api_key.startswith("sk-"): 
+                st.error("⚠️ 老闆，請先在左側輸入 OpenAI 金鑰！")
             else:
-                st.success("✅ 昨夜美股數據抓取成功！")
-                cols = st.columns(4)
-                idx = 0
-                for name, data in overnight_data.items():
-                    delta_color = "normal"
-                    if data['漲跌幅'] > 0:
-                        delta_str = f"🔺 {data['漲跌幅']}%"
-                    elif data['漲跌幅'] < 0:
-                        delta_str = f"🔻 {data['漲跌幅']}%"
-                        delta_color = "inverse" 
-                    else:
-                        delta_str = "➖ 0%"
-                    cols[idx].metric(label=name, value=data['收盤價'], delta=delta_str, delta_color="normal")
-                    idx += 1
-                
-                data_str = "\n".join([f"{k}: 收盤 {v['收盤價']}, 漲跌幅 {v['漲跌幅']}%" for k, v in overnight_data.items()])
-                prompt = f"請根據以下【昨夜美股與台積電 ADR 的收盤數據】，進行今日台股的開盤預測與作戰會議報告：\n{data_str}\n\n請回答：\n1. 今日大盤預測\n2. 資金流向預測\n3. 針對尋找「跌破布林下軌的超跌反彈股」的老闆，給予今日實戰建議。"
-                
-                with st.spinner("🤖 GPT 投資長正在撰寫今日晨報，請稍候..."):
-                    try:
-                        client = OpenAI(api_key=ai_api_key)
-                        res = client.chat.completions.create(model="gpt-4o-mini", messages=[{"role": "user", "content": prompt}])
-                        st.markdown("### 📝 【GPT 投資長 晨間作戰報告】")
-                        st.write(res.choices[0].message.content)
-                    except Exception as e:
-                        st.error(f"❌ AI 分析失敗：{e}")
+                with st.spinner("🌐 正在為您搜集所有庫存股的最新新聞，這可能需要一點時間..."):
+                    all_news = []
+                    # 迴圈抓取庫存名單內所有股票的新聞 (每檔抓3則避免資訊超載)
+                    for stock in st.session_state.my_portfolio:
+                        stock_news = get_stock_news(stock, limit=3) 
+                        all_news.extend(stock_news)
+                    
+                if not all_news:
+                    st.warning("😅 找不到您的庫存股近期新聞。")
+                else:
+                    st.success("✅ 庫存情報搜集完畢！正在交給 GPT 投資長分析...")
+                    
+                    combined_news_text = "\n".join(all_news)
+                    prompt = f"""
+                    你是頂尖的台股財富管理顧問。以下是老闆目前持有的「庫存股清單」以及這些股票最新的市場新聞：
+                    
+                    【庫存股最新新聞情報】：
+                    {combined_news_text}
+                    
+                    請根據以上資訊，為老闆寫一份「庫存股總體檢報告」，報告必須包含：
+                    1. 📊 個股狀態掃描：簡述每檔庫存股目前遭遇的是利多還是利空？
+                    2. ⚠️ 風險與機會提示：整個投資組合中，哪一檔股票有隱含風險需要小心？哪一檔可能即將爆發？
+                    3. 💡 老闆專屬操作建議：針對這份名單，目前應該「續抱」、「加碼」還是「逢高減碼」？
+                    """
+                    
+                    with st.spinner("🤖 GPT 投資長正在撰寫庫存診斷書..."):
+                        try:
+                            client = OpenAI(api_key=ai_api_key)
+                            res = client.chat.completions.create(
+                                model="gpt-4o-mini", 
+                                messages=[{"role": "user", "content": prompt}]
+                            )
+                            st.markdown("---")
+                            st.write(res.choices[0].message.content)
+                        except Exception as e:
+                            st.error(f"❌ 分析失敗：{e}")
+    else:
+        st.info("💡 您的庫存名單目前是空的，請從上方新增股票代號。")
