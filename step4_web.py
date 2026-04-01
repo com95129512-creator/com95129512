@@ -8,21 +8,47 @@ import urllib3
 import xml.etree.ElementTree as ET
 import urllib.parse
 from openai import OpenAI 
+import gspread # 🆕 新增：用來控制 Google 試算表的套件
+import json
 
-# 關閉不安全連線警告
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 st.set_page_config(page_title="老闆的專屬選股雷達", layout="wide")
-st.title("📊 專屬 AI 策略選股雷達 & 庫存戰情室 (🚀 終極版)")
+st.title("📊 專屬 AI 策略選股雷達 & 庫存戰情室 (🚀 完全體)")
 
 # ==========================================
-# 💾 系統記憶體初始化 (用來儲存老闆的庫存股)
+# 💾 雲端資料庫連線 (Google Sheets)
 # ==========================================
+@st.cache_resource
+def init_db():
+    try:
+        # 嘗試從 Streamlit 保險箱拿出鑰匙
+        creds_dict = json.loads(st.secrets["google_credentials"])
+        gc = gspread.service_account_from_dict(creds_dict)
+        # 打開老闆的試算表
+        sh = gc.open("My_Stock_Portfolio")
+        return sh.sheet1
+    except Exception as e:
+        # 如果保險箱沒設好，或是找不到表單，就回傳 None
+        return None
+
+worksheet = init_db()
+
+# 初始化庫存名單
 if 'my_portfolio' not in st.session_state:
-    st.session_state.my_portfolio = ['2330', '3231'] # 預設先放兩檔讓老闆測試
+    if worksheet:
+        try:
+            # 從試算表的第一欄抓取所有資料
+            records = worksheet.col_values(1)
+            # 過濾掉標題列 'Stock_ID' 和空白行
+            st.session_state.my_portfolio = [r for r in records if r != 'Stock_ID' and r.strip() != '']
+        except:
+            st.session_state.my_portfolio = []
+    else:
+        st.session_state.my_portfolio = [] # 資料庫連線失敗時的備用空名單
 
 # ==========================================
-# 📡 核心函數區 (快取加速)
+# 📡 函數區
 # ==========================================
 @st.cache_data(ttl=86400)
 def get_all_tw_stocks():
@@ -121,9 +147,6 @@ filter_bb = st.sidebar.radio("布林位階：", ["不篩選", "📉 跌破下軌
 # ==========================================
 tab1, tab2, tab3, tab4, tab5 = st.tabs(["📊 雷達掃描", "📰 個股新聞", "📈 歷史回測", "🌙 晨間會議", "💼 我的庫存股"])
 
-# ------------------------------------------
-# 1. 策略選股
-# ------------------------------------------
 with tab1:
     if st.button("🚀 開始掃描全市場！", type="primary"):
         passed_stocks = []
@@ -146,7 +169,6 @@ with tab1:
                 if filter_bb == "📉 跌破下軌" and (latest['Close'] > latest['Lower_BB']): continue
                 if filter_bb == "➖ 站上中軌" and (latest['Close'] < latest['Middle_BB']): continue
                 if filter_bb == "📈 突破上軌" and (latest['Close'] < latest['Upper_BB']): continue
-                
                 passed_stocks.append({"代號": stock.replace('.TW', '').replace('.TWO', ''), "收盤價": round(latest['Close'], 2)})
             except:
                 pass
@@ -157,9 +179,6 @@ with tab1:
         else:
             st.error("沒有股票符合條件。")
 
-# ------------------------------------------
-# 2. AI 新聞解讀 
-# ------------------------------------------
 with tab2:
     st.subheader("🤖 個股深度分析")
     target_stock_news = st.text_input("輸入股票代號搜新聞：", "3231", key="news_input")
@@ -179,9 +198,6 @@ with tab2:
             else:
                 st.warning("找不到新聞。")
 
-# ------------------------------------------
-# 3. 歷史勝率回測
-# ------------------------------------------
 with tab3:
     st.subheader("⏱️ 1 年真實數據回測")
     target_stock_bt = st.text_input("輸入要回測的代號：", "2330", key="bt_input")
@@ -196,7 +212,6 @@ with tab3:
                 for date, row in df_bt.iterrows():
                     if not in_position:
                         if (row['Volume']/1000) >= set_volume and (k_range[0] <= row['K'] <= k_range[1]) and (d_range[0] <= row['D'] <= d_range[1]):
-                            # 簡化判斷邏輯節省版面
                             in_position, buy_price, buy_date = True, row['Close'], date.strftime('%Y-%m-%d')
                     else:
                         if row['Close'] >= row['Middle_BB'] or row['Close'] <= buy_price * 0.9: 
@@ -208,9 +223,6 @@ with tab3:
                 else:
                     st.warning("從未符合進場條件。")
 
-# ------------------------------------------
-# 4. 晨間作戰會議
-# ------------------------------------------
 with tab4:
     st.subheader("🌅 夜盤與美股影響分析")
     if st.button("☕ 生成作戰報告", type="primary"):
@@ -229,32 +241,44 @@ with tab4:
                     st.error(e)
 
 # ------------------------------------------
-# ⭐ 5. 我的庫存戰情室 (全新功能)
+# ⭐ 5. 永久記憶的庫存戰情室
 # ------------------------------------------
 with tab5:
-    st.subheader("💼 專屬庫存股與自選名單")
-    st.markdown("在這裡管理您的持股，並讓 AI 每天為您的投資組合進行健康檢查！")
+    st.subheader("💼 專屬庫存股 (已同步至 Google 雲端)")
+    if worksheet is None:
+        st.error("⚠️ 雲端資料庫連線失敗！請確認 Streamlit Secrets 設定正確，且試算表已共用給機器人。")
     
-    # 庫存管理區 (新增/刪除)
     col1, col2 = st.columns(2)
     with col1:
-        new_stock = st.text_input("➕ 新增股票 (輸入代號，例如: 2603)")
+        new_stock = st.text_input("➕ 新增股票 (輸入代號)")
         if st.button("加入名單"):
             if new_stock and new_stock not in st.session_state.my_portfolio:
+                if worksheet:
+                    try:
+                        worksheet.append_row([new_stock]) # 寫入雲端
+                    except Exception as e:
+                        st.error(f"寫入雲端失敗: {e}")
                 st.session_state.my_portfolio.append(new_stock)
-                st.success(f"✅ {new_stock} 已成功加入您的庫存！")
-                st.rerun() # 重新整理畫面更新表格
+                st.success(f"✅ {new_stock} 已存入雲端！")
+                st.rerun()
+                
     with col2:
         del_stock = st.text_input("🗑️ 刪除股票 (輸入代號)")
         if st.button("移出名單"):
             if del_stock in st.session_state.my_portfolio:
+                if worksheet:
+                    try:
+                        cell = worksheet.find(del_stock) # 在雲端尋找這檔股票
+                        if cell:
+                            worksheet.delete_rows(cell.row) # 從雲端刪除該列
+                    except Exception as e:
+                        st.error(f"刪除雲端資料失敗: {e}")
                 st.session_state.my_portfolio.remove(del_stock)
                 st.warning(f"❌ {del_stock} 已移出名單！")
                 st.rerun()
 
     st.markdown("---")
     
-    # 顯示當前庫存報價
     if st.session_state.my_portfolio:
         st.markdown("### 📋 目前追蹤清單即時報價")
         portfolio_data = []
@@ -275,41 +299,24 @@ with tab5:
             if not ai_api_key.startswith("sk-"): 
                 st.error("⚠️ 老闆，請先在左側輸入 OpenAI 金鑰！")
             else:
-                with st.spinner("🌐 正在為您搜集所有庫存股的最新新聞，這可能需要一點時間..."):
+                with st.spinner("🌐 正在為您搜集所有庫存股的最新新聞..."):
                     all_news = []
-                    # 迴圈抓取庫存名單內所有股票的新聞 (每檔抓3則避免資訊超載)
                     for stock in st.session_state.my_portfolio:
                         stock_news = get_stock_news(stock, limit=3) 
                         all_news.extend(stock_news)
                     
                 if not all_news:
-                    st.warning("😅 找不到您的庫存股近期新聞。")
+                    st.warning("😅 找不到新聞。")
                 else:
-                    st.success("✅ 庫存情報搜集完畢！正在交給 GPT 投資長分析...")
-                    
+                    st.success("✅ 情報搜集完畢！正在交給 GPT 分析...")
                     combined_news_text = "\n".join(all_news)
-                    prompt = f"""
-                    你是頂尖的台股財富管理顧問。以下是老闆目前持有的「庫存股清單」以及這些股票最新的市場新聞：
-                    
-                    【庫存股最新新聞情報】：
-                    {combined_news_text}
-                    
-                    請根據以上資訊，為老闆寫一份「庫存股總體檢報告」，報告必須包含：
-                    1. 📊 個股狀態掃描：簡述每檔庫存股目前遭遇的是利多還是利空？
-                    2. ⚠️ 風險與機會提示：整個投資組合中，哪一檔股票有隱含風險需要小心？哪一檔可能即將爆發？
-                    3. 💡 老闆專屬操作建議：針對這份名單，目前應該「續抱」、「加碼」還是「逢高減碼」？
-                    """
-                    
-                    with st.spinner("🤖 GPT 投資長正在撰寫庫存診斷書..."):
-                        try:
-                            client = OpenAI(api_key=ai_api_key)
-                            res = client.chat.completions.create(
-                                model="gpt-4o-mini", 
-                                messages=[{"role": "user", "content": prompt}]
-                            )
-                            st.markdown("---")
-                            st.write(res.choices[0].message.content)
-                        except Exception as e:
-                            st.error(f"❌ 分析失敗：{e}")
+                    prompt = f"你是頂尖財富顧問。以下是庫存股清單與新聞：\n{combined_news_text}\n請寫一份庫存總體檢報告：1.個股狀態掃描 2.風險與機會 3.操作建議(續抱/加碼/減碼)"
+                    try:
+                        client = OpenAI(api_key=ai_api_key)
+                        res = client.chat.completions.create(model="gpt-4o-mini", messages=[{"role": "user", "content": prompt}])
+                        st.markdown("---")
+                        st.write(res.choices[0].message.content)
+                    except Exception as e:
+                        st.error(f"❌ 分析失敗：{e}")
     else:
-        st.info("💡 您的庫存名單目前是空的，請從上方新增股票代號。")
+        st.info("💡 您的雲端庫存目前是空的，請從上方新增。")
