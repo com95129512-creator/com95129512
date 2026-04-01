@@ -5,11 +5,11 @@ import time
 import requests
 import random
 import urllib3
-import xml.etree.ElementTree as ET
 import urllib.parse
-from openai import OpenAI 
-import gspread # 🆕 新增：用來控制 Google 試算表的套件
 import json
+import gspread
+import xml.etree.ElementTree as ET
+from openai import OpenAI 
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -22,33 +22,26 @@ st.title("📊 專屬 AI 策略選股雷達 & 庫存戰情室 (🚀 完全體)")
 @st.cache_resource
 def init_db():
     try:
-        # 嘗試從 Streamlit 保險箱拿出鑰匙
         creds_dict = json.loads(st.secrets["google_credentials"])
         gc = gspread.service_account_from_dict(creds_dict)
-        # 打開老闆的試算表
-        sh = gc.open("My_Stock_Portfolio")
-        return sh.sheet1
-    except Exception as e:
-        # 如果保險箱沒設好，或是找不到表單，就回傳 None
+        return gc.open("My_Stock_Portfolio").sheet1
+    except:
         return None
 
 worksheet = init_db()
 
-# 初始化庫存名單
 if 'my_portfolio' not in st.session_state:
     if worksheet:
         try:
-            # 從試算表的第一欄抓取所有資料
             records = worksheet.col_values(1)
-            # 過濾掉標題列 'Stock_ID' 和空白行
             st.session_state.my_portfolio = [r for r in records if r != 'Stock_ID' and r.strip() != '']
         except:
             st.session_state.my_portfolio = []
     else:
-        st.session_state.my_portfolio = [] # 資料庫連線失敗時的備用空名單
+        st.session_state.my_portfolio = [] 
 
 # ==========================================
-# 📡 函數區
+# 📡 核心函數區
 # ==========================================
 @st.cache_data(ttl=86400)
 def get_all_tw_stocks():
@@ -85,8 +78,7 @@ def get_overnight_market_data():
             if len(df) >= 2:
                 last_close = df['Close'].iloc[-1]
                 prev_close = df['Close'].iloc[-2]
-                pct_change = ((last_close - prev_close) / prev_close) * 100
-                results[name] = {"收盤價": round(last_close, 2), "漲跌幅": round(pct_change, 2)}
+                results[name] = {"收盤價": round(last_close, 2), "漲跌幅": round(((last_close - prev_close) / prev_close) * 100, 2)}
         except:
             pass
     return results
@@ -96,9 +88,8 @@ def get_stock_news(stock_name, limit=5):
     url = f"https://news.google.com/rss/search?q={query}&hl=zh-TW&gl=TW&ceid=TW:zh-Hant"
     try:
         res = requests.get(url, verify=False, timeout=10)
-        root = ET.fromstring(res.text)
         news_list = []
-        for item in root.findall('.//item')[:limit]: 
+        for item in ET.fromstring(res.text).findall('.//item')[:limit]: 
             news_list.append(f"[{stock_name}] 日期: {item.find('pubDate').text} | 標題: {item.find('title').text}")
         return news_list
     except:
@@ -110,9 +101,7 @@ def calculate_indicators(df, kd_days, macd_fast, macd_slow, bb_days, bb_std):
     df['RSV'] = 100 * ((df['Close'] - low_min) / (high_max - low_min))
     df['K'] = df['RSV'].ewm(com=2, adjust=False).mean()
     df['D'] = df['K'].ewm(com=2, adjust=False).mean()
-    exp1 = df['Close'].ewm(span=macd_fast, adjust=False).mean()
-    exp2 = df['Close'].ewm(span=macd_slow, adjust=False).mean()
-    df['MACD'] = exp1 - exp2
+    df['MACD'] = df['Close'].ewm(span=macd_fast, adjust=False).mean() - df['Close'].ewm(span=macd_slow, adjust=False).mean()
     df['Middle_BB'] = df['Close'].rolling(window=bb_days).mean()
     df['STD'] = df['Close'].rolling(window=bb_days).std()
     df['Upper_BB'] = df['Middle_BB'] + (df['STD'] * bb_std)
@@ -159,8 +148,7 @@ with tab1:
             df = get_stock_history(stock, "6mo")
             if df.empty: continue
             try:
-                df_calc = calculate_indicators(df.copy(), kd_days, macd_fast, macd_slow, bb_days, bb_std)
-                latest = df_calc.iloc[-1]
+                latest = calculate_indicators(df.copy(), kd_days, macd_fast, macd_slow, bb_days, bb_std).iloc[-1]
                 if (latest['Volume'] / 1000) < set_volume: continue
                 if not (k_range[0] <= latest['K'] <= k_range[1]): continue
                 if not (d_range[0] <= latest['D'] <= d_range[1]): continue
@@ -172,12 +160,9 @@ with tab1:
                 passed_stocks.append({"代號": stock.replace('.TW', '').replace('.TWO', ''), "收盤價": round(latest['Close'], 2)})
             except:
                 pass
-        
         st.success("✅ 掃描完成！")
-        if passed_stocks:
-            st.dataframe(pd.DataFrame(passed_stocks), use_container_width=True)
-        else:
-            st.error("沒有股票符合條件。")
+        if passed_stocks: st.dataframe(pd.DataFrame(passed_stocks), use_container_width=True)
+        else: st.error("沒有股票符合條件。")
 
 with tab2:
     st.subheader("🤖 個股深度分析")
@@ -185,18 +170,14 @@ with tab2:
     if st.button("🧠 開始分析"):
         if not ai_api_key.startswith("sk-"): st.error("請輸入 OpenAI 金鑰！")
         else:
-            with st.spinner("🌐 搜集新聞中..."):
-                news_data = get_stock_news(target_stock_news)
+            with st.spinner("🌐 搜集新聞中..."): news_data = get_stock_news(target_stock_news)
             if news_data:
                 prompt = f"請分析以下【{target_stock_news}】的新聞：\n1. 媒體情緒\n2. 主力意圖\n3. 實戰建議\n\n{chr(10).join(news_data)}"
                 try:
-                    client = OpenAI(api_key=ai_api_key)
-                    res = client.chat.completions.create(model="gpt-4o-mini", messages=[{"role": "user", "content": prompt}])
+                    res = OpenAI(api_key=ai_api_key).chat.completions.create(model="gpt-4o-mini", messages=[{"role": "user", "content": prompt}])
                     st.write(res.choices[0].message.content)
-                except Exception as e:
-                    st.error(f"分析失敗：{e}")
-            else:
-                st.warning("找不到新聞。")
+                except Exception as e: st.error(f"分析失敗：{e}")
+            else: st.warning("找不到新聞。")
 
 with tab3:
     st.subheader("⏱️ 1 年真實數據回測")
@@ -215,108 +196,77 @@ with tab3:
                             in_position, buy_price, buy_date = True, row['Close'], date.strftime('%Y-%m-%d')
                     else:
                         if row['Close'] >= row['Middle_BB'] or row['Close'] <= buy_price * 0.9: 
-                            trades.append({'進場': buy_date, '出場': date.strftime('%Y-%m-%d'), '報酬率': (row['Close'] - buy_price) / buy_price})
+                            trades.append({'進場': buy_date, '出場': date.strftime('%Y-%m-%d'), '報酬率': f"{((row['Close'] - buy_price) / buy_price)*100:.2f}%"})
                             in_position = False
                 if trades:
                     st.success(f"回測完成！共觸發 {len(trades)} 次。")
                     st.dataframe(pd.DataFrame(trades))
-                else:
-                    st.warning("從未符合進場條件。")
+                else: st.warning("從未符合進場條件。")
 
 with tab4:
     st.subheader("🌅 夜盤與美股影響分析")
     if st.button("☕ 生成作戰報告", type="primary"):
         if not ai_api_key.startswith("sk-"): st.error("請輸入金鑰！")
         else:
-            with st.spinner("連線華爾街中..."):
-                ov_data = get_overnight_market_data()
+            with st.spinner("連線華爾街中..."): ov_data = get_overnight_market_data()
             if ov_data:
-                st.write(ov_data)
+                cols = st.columns(4)
+                for i, (name, data) in enumerate(ov_data.items()):
+                    cols[i].metric(label=name, value=data['收盤價'], delta=f"{data['漲跌幅']}%")
                 prompt = f"根據昨夜美股數據預測今日台股走勢及抄底建議：\n{ov_data}"
                 try:
-                    client = OpenAI(api_key=ai_api_key)
-                    res = client.chat.completions.create(model="gpt-4o-mini", messages=[{"role": "user", "content": prompt}])
+                    res = OpenAI(api_key=ai_api_key).chat.completions.create(model="gpt-4o-mini", messages=[{"role": "user", "content": prompt}])
                     st.write(res.choices[0].message.content)
-                except Exception as e:
-                    st.error(e)
+                except Exception as e: st.error(e)
 
-# ------------------------------------------
-# ⭐ 5. 永久記憶的庫存戰情室
-# ------------------------------------------
 with tab5:
     st.subheader("💼 專屬庫存股 (已同步至 Google 雲端)")
-    if worksheet is None:
-        st.error("⚠️ 雲端資料庫連線失敗！請確認 Streamlit Secrets 設定正確，且試算表已共用給機器人。")
+    if worksheet is None: st.error("⚠️ 雲端資料庫連線失敗！請確認 Secrets 且表單已共用給機器人。")
     
     col1, col2 = st.columns(2)
     with col1:
         new_stock = st.text_input("➕ 新增股票 (輸入代號)")
-        if st.button("加入名單"):
-            if new_stock and new_stock not in st.session_state.my_portfolio:
-                if worksheet:
-                    try:
-                        worksheet.append_row([new_stock]) # 寫入雲端
-                    except Exception as e:
-                        st.error(f"寫入雲端失敗: {e}")
-                st.session_state.my_portfolio.append(new_stock)
-                st.success(f"✅ {new_stock} 已存入雲端！")
-                st.rerun()
+        if st.button("加入名單") and new_stock and new_stock not in st.session_state.my_portfolio:
+            if worksheet:
+                try: worksheet.append_row([new_stock])
+                except Exception as e: st.error(f"寫入失敗: {e}")
+            st.session_state.my_portfolio.append(new_stock)
+            st.rerun()
                 
     with col2:
         del_stock = st.text_input("🗑️ 刪除股票 (輸入代號)")
-        if st.button("移出名單"):
-            if del_stock in st.session_state.my_portfolio:
-                if worksheet:
-                    try:
-                        cell = worksheet.find(del_stock) # 在雲端尋找這檔股票
-                        if cell:
-                            worksheet.delete_rows(cell.row) # 從雲端刪除該列
-                    except Exception as e:
-                        st.error(f"刪除雲端資料失敗: {e}")
-                st.session_state.my_portfolio.remove(del_stock)
-                st.warning(f"❌ {del_stock} 已移出名單！")
-                st.rerun()
+        if st.button("移出名單") and del_stock in st.session_state.my_portfolio:
+            if worksheet:
+                try:
+                    cell = worksheet.find(del_stock)
+                    if cell: worksheet.delete_rows(cell.row)
+                except Exception as e: st.error(f"刪除失敗: {e}")
+            st.session_state.my_portfolio.remove(del_stock)
+            st.rerun()
 
     st.markdown("---")
-    
     if st.session_state.my_portfolio:
-        st.markdown("### 📋 目前追蹤清單即時報價")
         portfolio_data = []
         for stock in st.session_state.my_portfolio:
-            stock_id = f"{stock}.TW" if len(stock) == 4 else stock
-            df = get_stock_history(stock_id, "5d")
+            df = get_stock_history(f"{stock}.TW" if len(stock) == 4 else stock, "5d")
             if not df.empty and len(df) >= 2:
-                last_price = df['Close'].iloc[-1]
-                prev_price = df['Close'].iloc[-2]
-                change = ((last_price - prev_price) / prev_price) * 100
-                portfolio_data.append({"股票代號": stock, "最新收盤價": round(last_price, 2), "單日漲跌幅(%)": round(change, 2)})
+                last_price, prev_price = df['Close'].iloc[-1], df['Close'].iloc[-2]
+                portfolio_data.append({"代號": stock, "最新收盤價": round(last_price, 2), "單日漲跌幅(%)": round(((last_price - prev_price) / prev_price) * 100, 2)})
         
-        if portfolio_data:
-            st.dataframe(pd.DataFrame(portfolio_data), use_container_width=True)
+        if portfolio_data: st.dataframe(pd.DataFrame(portfolio_data), use_container_width=True)
             
-        st.markdown("### 🏥 庫存股 AI 總體檢")
         if st.button("🔥 一鍵獲取庫存 AI 診斷報告", type="primary"):
-            if not ai_api_key.startswith("sk-"): 
-                st.error("⚠️ 老闆，請先在左側輸入 OpenAI 金鑰！")
+            if not ai_api_key.startswith("sk-"): st.error("請輸入金鑰！")
             else:
-                with st.spinner("🌐 正在為您搜集所有庫存股的最新新聞..."):
+                with st.spinner("搜集庫存股新聞中..."):
                     all_news = []
-                    for stock in st.session_state.my_portfolio:
-                        stock_news = get_stock_news(stock, limit=3) 
-                        all_news.extend(stock_news)
-                    
-                if not all_news:
-                    st.warning("😅 找不到新聞。")
-                else:
-                    st.success("✅ 情報搜集完畢！正在交給 GPT 分析...")
-                    combined_news_text = "\n".join(all_news)
-                    prompt = f"你是頂尖財富顧問。以下是庫存股清單與新聞：\n{combined_news_text}\n請寫一份庫存總體檢報告：1.個股狀態掃描 2.風險與機會 3.操作建議(續抱/加碼/減碼)"
+                    for stock in st.session_state.my_portfolio: all_news.extend(get_stock_news(stock, limit=3))
+                if all_news:
+                    prompt = f"你是頂尖財富顧問。以下是庫存股新聞：\n{chr(10).join(all_news)}\n請寫庫存總體檢報告：1.個股狀態 2.風險與機會 3.操作建議"
                     try:
-                        client = OpenAI(api_key=ai_api_key)
-                        res = client.chat.completions.create(model="gpt-4o-mini", messages=[{"role": "user", "content": prompt}])
-                        st.markdown("---")
+                        res = OpenAI(api_key=ai_api_key).chat.completions.create(model="gpt-4o-mini", messages=[{"role": "user", "content": prompt}])
                         st.write(res.choices[0].message.content)
-                    except Exception as e:
-                        st.error(f"❌ 分析失敗：{e}")
+                    except Exception as e: st.error(f"分析失敗：{e}")
+                else: st.warning("找不到新聞。")
     else:
-        st.info("💡 您的雲端庫存目前是空的，請從上方新增。")
+        st.info("💡 目前沒有庫存股票。")
