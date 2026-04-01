@@ -7,10 +7,10 @@ from openai import OpenAI
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 st.set_page_config(page_title="老闆的專屬選股雷達", layout="wide")
-st.title("📊 專屬 AI 策略選股雷達 & 庫存戰情室 (🚀 抗封鎖精準版)")
+st.title("📊 專屬 AI 策略選股雷達 & 庫存戰情室 (🚀 強制清洗版)")
 
 # ==========================================
-# 💾 雲端資料庫連線
+# 💾 雲端資料庫連線 (Google Sheets)
 # ==========================================
 @st.cache_resource
 def init_db():
@@ -51,13 +51,11 @@ def get_all_tw_stocks():
     except:
         return ["2330.TW", "2317.TW", "3231.TW", "2603.TW", "2308.TW"]
 
-# ⭐ 核心修復：拒絕快取空白資料，防止記憶體中毒
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_stock_history(stock_id, period="6mo"):
     df = yf.Ticker(stock_id).history(period=period)
-    # 如果抓不到資料，或是資料太少算不出均線，直接強制拋出錯誤，讓系統【不要】存入記憶體！
     if df.empty or len(df) < 30:
-        raise Exception("Fetch failed or not enough data")
+        raise Exception("Fetch failed")
     return df
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -135,15 +133,17 @@ if use_bb_below_mid:
 tab1, tab2, tab3, tab4, tab5 = st.tabs(["📊 雷達掃描", "📰 個股新聞", "📈 歷史回測", "🌙 晨間會議", "💼 我的庫存股"])
 
 with tab1:
-    col_run, col_clear = st.columns([3, 1])
-    with col_run: run_btn = st.button("🚀 開始執行篩選！", type="primary", use_container_width=True)
-    with col_clear:
-        if st.button("🔄 清除快取記憶", use_container_width=True):
-            st.cache_data.clear()
-            st.success("✅ 舊的錯誤記憶已徹底刪除！")
+    # ⭐ 只有一個霸氣的按鈕，按下直接清空記憶
+    run_btn = st.button("🚀 啟動掃描 (每次自動清洗舊記憶)", type="primary", use_container_width=True)
 
     if run_btn:
+        # ⭐ 老闆指定的霸氣操作：一鍵炸毀舊快取
+        st.cache_data.clear()
+        st.warning("🧹 系統已強制清空所有舊資料！正在為您向華爾街索取最新報價...")
+        
         passed_stocks = []
+        failed_count = 0 # 紀錄被 Yahoo 阻擋的次數
+        
         all_stocks = get_all_tw_stocks()
         stock_database = random.sample(all_stocks, min(50, len(all_stocks))) if "測試模式" in scan_mode else all_stocks
         progress_bar = st.progress(0)
@@ -154,10 +154,11 @@ with tab1:
             status_text.text(f"📡 正在掃描 {stock} ({i+1}/{len(stock_database)})...")
             
             try:
+                # 嘗試拿資料，拿不到就拋出錯誤
                 df = get_stock_history(stock, "6mo")
             except:
-                # ⭐ 核心修復：如果被 Yahoo 阻擋，我們就稍微休息一下，不要硬衝
-                time.sleep(random.uniform(0.05, 0.1))
+                failed_count += 1
+                time.sleep(random.uniform(0.05, 0.1)) # 稍微休息騙過 Yahoo
                 continue
                 
             try:
@@ -169,9 +170,16 @@ with tab1:
                 passed_stocks.append({"代號": stock.replace('.TW', '').replace('.TWO', ''), "收盤價": round(latest['Close'], 2)})
             except: pass
         
-        status_text.text(f"✅ 掃描完成！共過濾 {len(stock_database)} 檔股票。")
-        if passed_stocks: st.dataframe(pd.DataFrame(passed_stocks), use_container_width=True)
-        else: st.error("目前市場上沒有股票同時符合您「勾選」的條件，請嘗試放寬標準。")
+        status_text.text(f"✅ 掃描完成！")
+        
+        if failed_count > 0:
+            st.error(f"⚠️ 報告老闆：在掃描過程中，Yahoo 財經的防護網阻擋了我們 {failed_count} 檔股票的連線要求，已自動為您跳過這些標的。")
+            
+        if passed_stocks: 
+            st.dataframe(pd.DataFrame(passed_stocks), use_container_width=True)
+            st.success(f"🎉 恭喜！成功從股海中撈出 {len(passed_stocks)} 檔符合您嚴格條件的股票！")
+        else: 
+            st.warning("😅 目前市場上沒有股票同時符合您「勾選」的所有條件，建議您稍微放寬左側的參數喔！")
 
 with tab2:
     st.subheader("🤖 個股深度分析")
@@ -195,6 +203,8 @@ with tab3:
     if st.button("⏳ 啟動回測"):
         with st.spinner("調閱 1 年資料..."):
             try:
+                # 回測時也先清空一下快取，確保用最新的
+                st.cache_data.clear()
                 df_bt = get_stock_history(f"{target_stock_bt}.TW" if len(target_stock_bt) == 4 else target_stock_bt, "1y")
                 df_bt = calculate_indicators(df_bt.copy(), kd_days, macd_fast, macd_slow, bb_days, bb_std).dropna()
                 trades, in_position, buy_price = [], False, 0
@@ -217,56 +227,3 @@ with tab3:
 
 with tab4:
     st.subheader("🌅 晨間作戰分析")
-    if st.button("☕ 生成報告"):
-        if not ai_api_key.startswith("sk-"): st.error("請輸入金鑰！")
-        else:
-            with st.spinner("連線中..."): ov_data = get_overnight_market_data()
-            if ov_data:
-                st.write(ov_data)
-                try:
-                    res = OpenAI(api_key=ai_api_key).chat.completions.create(
-                        model="gpt-4o-mini", messages=[{"role": "user", "content": f"根據數據預測台股開盤：\n{ov_data}"}]
-                    )
-                    st.write(res.choices[0].message.content)
-                except Exception as e: st.error(e)
-
-with tab5:
-    st.subheader("💼 我的庫存股")
-    if worksheet is None: st.error("⚠️ 雲端連線失敗！")
-    col1, col2 = st.columns(2)
-    with col1:
-        new_stock = st.text_input("➕ 新增股票")
-        if st.button("加入") and new_stock and new_stock not in st.session_state.my_portfolio:
-            if worksheet: worksheet.append_row([new_stock])
-            st.session_state.my_portfolio.append(new_stock)
-            st.rerun()
-    with col2:
-        del_stock = st.text_input("🗑️ 刪除股票")
-        if st.button("移除") and del_stock in st.session_state.my_portfolio:
-            if worksheet:
-                cell = worksheet.find(del_stock)
-                if cell: worksheet.delete_rows(cell.row)
-            st.session_state.my_portfolio.remove(del_stock)
-            st.rerun()
-            
-    if st.session_state.my_portfolio:
-        portfolio_data = []
-        for stock in st.session_state.my_portfolio:
-            try:
-                df = get_stock_history(f"{stock}.TW" if len(stock) == 4 else stock, "5d")
-                last_price, prev_price = df['Close'].iloc[-1], df['Close'].iloc[-2]
-                portfolio_data.append({"代號": stock, "最新收盤價": round(last_price, 2), "漲跌幅(%)": round(((last_price - prev_price)/prev_price)*100, 2)})
-            except: pass
-        if portfolio_data: st.dataframe(pd.DataFrame(portfolio_data), use_container_width=True)
-        
-        if st.button("🔥 一鍵診斷"):
-            if not ai_api_key.startswith("sk-"): st.error("請輸入金鑰！")
-            else:
-                all_news = []
-                for stock in st.session_state.my_portfolio: all_news.extend(get_stock_news(stock, limit=2))
-                try:
-                    res = OpenAI(api_key=ai_api_key).chat.completions.create(
-                        model="gpt-4o-mini", messages=[{"role": "user", "content": f"庫存體檢：\n{chr(10).join(all_news)}"}]
-                    )
-                    st.write(res.choices[0].message.content)
-                except Exception as e: st.error(f"分析失敗：{e}")
