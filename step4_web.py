@@ -33,11 +33,9 @@ if 'my_portfolio' not in st.session_state:
 @st.cache_data(ttl=86400)
 def get_all_tw_stocks():
     stock_list = []
-    # 備用百大權值股名單 (防止任何 API 斷線)
     fallback_list = ["2330.TW", "2317.TW", "2454.TW", "2382.TW", "2308.TW", "2881.TW", "2882.TW", "2891.TW", "2002.TW", "1216.TW", "2886.TW", "2884.TW", "2885.TW", "2892.TW", "2603.TW", "2880.TW", "2887.TW", "2883.TW", "5880.TW", "2890.TW", "2303.TW", "2609.TW", "2615.TW", "2412.TW", "3045.TW", "4904.TW", "2912.TW", "2357.TW", "2379.TW", "2301.TW", "2324.TW", "2353.TW", "2356.TW", "3231.TW", "2352.TW", "2377.TW", "2395.TW", "2408.TW", "2409.TW", "3481.TW", "2344.TW", "2404.TW", "2337.TW", "2338.TW", "2313.TW", "2362.TW", "2371.TW", "2385.TW", "2392.TW", "2449.TW"]
     
     try:
-        # 透過 AllOrigins 跳板繞過台灣證交所海外 IP 封鎖
         twse_url = "https://api.allorigins.win/raw?url=" + urllib.parse.quote("https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL")
         tpex_url = "https://api.allorigins.win/raw?url=" + urllib.parse.quote("https://www.tpex.org.tw/openapi/v1/tpex_mainboard_quotes")
         
@@ -52,7 +50,6 @@ def get_all_tw_stocks():
                 code = item.get('SecuritiesCompanyCode', item.get('Code', ''))
                 if len(code) == 4 and code.isdigit(): stock_list.append(f"{code}.TWO")
         
-        # 確保有抓到足夠的資料，否則啟用備用名單
         if len(stock_list) > 1000: return stock_list
         else: return fallback_list
     except:
@@ -113,7 +110,8 @@ ai_api_key = st.sidebar.text_input("輸入 OpenAI 金鑰 (sk-)：", type="passwo
 st.sidebar.markdown("---")
 
 st.sidebar.header("🎯 掃描範圍")
-scan_mode = st.sidebar.radio("雷達強度：", ["🧪 快速測試模式 (50檔)", "🔥 火力全開模式 (1700檔)"])
+# ⭐ 新增：500檔 中量級掃描選項
+scan_mode = st.sidebar.radio("雷達強度：", ["🧪 快速測試 (50檔)", "⚡ 中量掃描 (500檔)", "🔥 火力全開 (1700檔)"])
 st.sidebar.markdown("---")
 
 st.sidebar.header("⚙️ 篩選條件開關")
@@ -161,7 +159,15 @@ with tab1:
         passed_stocks = []
         failed_count = 0 
         
-        stock_database = random.sample(all_stocks, min(50, len(all_stocks))) if "測試模式" in scan_mode else all_stocks
+        # ⭐ 新增：判斷老闆選擇的掃描數量
+        if "50檔" in scan_mode:
+            sample_size = 50
+        elif "500檔" in scan_mode:
+            sample_size = 500
+        else:
+            sample_size = len(all_stocks)
+            
+        stock_database = random.sample(all_stocks, min(sample_size, len(all_stocks)))
         progress_bar = st.progress(0)
         status_text = st.empty()
         
@@ -246,45 +252,5 @@ with tab4:
             if ov_data:
                 st.write(ov_data)
                 try:
-                    res = OpenAI(api_key=ai_api_key).chat.completions.create(model="gpt-4o-mini", messages=[{"role": "user", "content": f"根據數據預測台股開盤：\n{ov_data}"}])
-                    st.write(res.choices[0].message.content)
-                except: pass
-
-with tab5:
-    st.subheader("💼 我的庫存股")
-    if worksheet is None: st.error("⚠️ 雲端連線失敗！")
-    col1, col2 = st.columns(2)
-    with col1:
-        new_stock = st.text_input("➕ 新增股票")
-        if st.button("加入") and new_stock and new_stock not in st.session_state.my_portfolio:
-            if worksheet: worksheet.append_row([new_stock])
-            st.session_state.my_portfolio.append(new_stock)
-            st.rerun()
-    with col2:
-        del_stock = st.text_input("🗑️ 刪除股票")
-        if st.button("移除") and del_stock in st.session_state.my_portfolio:
-            if worksheet:
-                cell = worksheet.find(del_stock)
-                if cell: worksheet.delete_rows(cell.row)
-            st.session_state.my_portfolio.remove(del_stock)
-            st.rerun()
-            
-    if st.session_state.my_portfolio:
-        portfolio_data = []
-        for stock in st.session_state.my_portfolio:
-            try:
-                df = get_stock_history(f"{stock}.TW" if len(stock) == 4 else stock, "5d")
-                last_price, prev_price = df['Close'].iloc[-1], df['Close'].iloc[-2]
-                portfolio_data.append({"代號": stock, "最新收盤價": round(last_price, 2), "漲跌幅(%)": round(((last_price - prev_price)/prev_price)*100, 2)})
-            except: pass
-        if portfolio_data: st.dataframe(pd.DataFrame(portfolio_data), use_container_width=True)
-        
-        if st.button("🔥 一鍵診斷"):
-            if not ai_api_key.startswith("sk-"): st.error("請輸入金鑰！")
-            else:
-                all_news = []
-                for stock in st.session_state.my_portfolio: all_news.extend(get_stock_news(stock, limit=2))
-                try:
-                    res = OpenAI(api_key=ai_api_key).chat.completions.create(model="gpt-4o-mini", messages=[{"role": "user", "content": f"庫存體檢：\n{chr(10).join(all_news)}"}])
-                    st.write(res.choices[0].message.content)
-                except: st.error("分析失敗")
+                    res = OpenAI(api_key=ai_api_key).chat.completions.create(
+                    
