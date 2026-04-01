@@ -252,5 +252,45 @@ with tab4:
             if ov_data:
                 st.write(ov_data)
                 try:
-                    res = OpenAI(api_key=ai_api_key).chat.completions.create(
-                    
+                    res = OpenAI(api_key=ai_api_key).chat.completions.create(model="gpt-4o-mini", messages=[{"role": "user", "content": f"根據數據預測台股開盤：\n{ov_data}"}])
+                    st.write(res.choices[0].message.content)
+                except: pass
+
+with tab5:
+    st.subheader("💼 我的庫存股")
+    if worksheet is None: st.error("⚠️ 雲端連線失敗！")
+    col1, col2 = st.columns(2)
+    with col1:
+        new_stock = st.text_input("➕ 新增股票")
+        if st.button("加入") and new_stock and new_stock not in st.session_state.my_portfolio:
+            if worksheet: worksheet.append_row([new_stock])
+            st.session_state.my_portfolio.append(new_stock)
+            st.rerun()
+    with col2:
+        del_stock = st.text_input("🗑️ 刪除股票")
+        if st.button("移除") and del_stock in st.session_state.my_portfolio:
+            if worksheet:
+                cell = worksheet.find(del_stock)
+                if cell: worksheet.delete_rows(cell.row)
+            st.session_state.my_portfolio.remove(del_stock)
+            st.rerun()
+            
+    if st.session_state.my_portfolio:
+        portfolio_data = []
+        for stock in st.session_state.my_portfolio:
+            try:
+                df = get_stock_history(f"{stock}.TW" if len(stock) == 4 else stock, "5d")
+                last_price, prev_price = df['Close'].iloc[-1], df['Close'].iloc[-2]
+                portfolio_data.append({"代號": stock, "最新收盤價": round(last_price, 2), "漲跌幅(%)": round(((last_price - prev_price)/prev_price)*100, 2)})
+            except: pass
+        if portfolio_data: st.dataframe(pd.DataFrame(portfolio_data), use_container_width=True)
+        
+        if st.button("🔥 一鍵診斷"):
+            if not ai_api_key.startswith("sk-"): st.error("請輸入金鑰！")
+            else:
+                all_news = []
+                for stock in st.session_state.my_portfolio: all_news.extend(get_stock_news(stock, limit=2))
+                try:
+                    res = OpenAI(api_key=ai_api_key).chat.completions.create(model="gpt-4o-mini", messages=[{"role": "user", "content": f"庫存體檢：\n{chr(10).join(all_news)}"}])
+                    st.write(res.choices[0].message.content)
+                except: st.error("分析失敗")
