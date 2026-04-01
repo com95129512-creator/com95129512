@@ -7,7 +7,7 @@ from openai import OpenAI
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 st.set_page_config(page_title="老闆的專屬選股雷達", layout="wide")
-st.title("📊 專屬 AI 策略選股雷達 & 庫存戰情室 (🚀 突破封鎖版)")
+st.title("📊 專屬 AI 策略選股雷達 & 庫存戰情室 (🚀 固定名單版)")
 
 # ==========================================
 # 💾 雲端資料庫連線
@@ -28,7 +28,7 @@ if 'my_portfolio' not in st.session_state:
     else: st.session_state.my_portfolio = [] 
 
 # ==========================================
-# 📡 核心函數區 (⭐ 跨國跳板破甲機制)
+# 📡 核心函數區
 # ==========================================
 @st.cache_data(ttl=86400)
 def get_all_tw_stocks():
@@ -62,7 +62,8 @@ def get_stock_history(stock_id, period="6mo"):
             df = yf.Ticker(stock_id).history(period=period)
             if not df.empty and len(df) >= 30: return df
         except:
-            time.sleep(random.uniform(0.1, 0.3))
+            # 延長休息時間，避免再被鎖定
+            time.sleep(random.uniform(0.2, 0.5))
     raise Exception("Fetch failed")
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -110,8 +111,7 @@ ai_api_key = st.sidebar.text_input("輸入 OpenAI 金鑰 (sk-)：", type="passwo
 st.sidebar.markdown("---")
 
 st.sidebar.header("🎯 掃描範圍")
-# ⭐ 新增：500檔 中量級掃描選項
-scan_mode = st.sidebar.radio("雷達強度：", ["🧪 快速測試 (50檔)", "⚡ 中量掃描 (500檔)", "🔥 火力全開 (1700檔)"])
+scan_mode = st.sidebar.radio("雷達強度：", ["🧪 測試鎖定 (50檔)", "⚡ 中量鎖定 (500檔)", "🔥 火力全開 (1700檔)"])
 st.sidebar.markdown("---")
 
 st.sidebar.header("⚙️ 篩選條件開關")
@@ -142,10 +142,13 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs(["📊 雷達掃描", "📰 個股新聞"
 
 with tab1:
     all_stocks = get_all_tw_stocks()
-    if len(all_stocks) > 1000:
-        st.info(f"🟢 跨國跳板連線成功：已載入 {len(all_stocks)} 檔台股清單。")
+    # ⭐ 核心更新：將股票代號進行排序，確保名單「鎖死」，不再隨機跳動
+    all_stocks_sorted = sorted(all_stocks)
+    
+    if len(all_stocks_sorted) > 1000:
+        st.info(f"🟢 跨國跳板連線成功：已載入 {len(all_stocks_sorted)} 檔台股清單。")
     else:
-        st.warning(f"🟡 跨國跳板受阻：已自動啟用【精選 50 檔中大型權值股】備用模式。")
+        st.warning(f"🟡 跨國跳板受阻：已自動啟用備用模式。")
 
     col_run, col_clear = st.columns([3, 1])
     with col_run: run_btn = st.button("🚀 啟動掃描 (每次自動清洗舊記憶)", type="primary", use_container_width=True)
@@ -159,15 +162,17 @@ with tab1:
         passed_stocks = []
         failed_count = 0 
         
-        # ⭐ 新增：判斷老闆選擇的掃描數量
+        # ⭐ 核心更新：不再使用 random.sample，而是直接「鎖定」最前面的名單
         if "50檔" in scan_mode:
             sample_size = 50
         elif "500檔" in scan_mode:
             sample_size = 500
         else:
-            sample_size = len(all_stocks)
+            sample_size = len(all_stocks_sorted)
             
-        stock_database = random.sample(all_stocks, min(sample_size, len(all_stocks)))
+        # 鎖定名單（取排序後的前 N 檔）
+        stock_database = all_stocks_sorted[:sample_size]
+        
         progress_bar = st.progress(0)
         status_text = st.empty()
         
