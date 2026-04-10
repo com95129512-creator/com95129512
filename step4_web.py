@@ -8,7 +8,7 @@ import twstock
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 st.set_page_config(page_title="老闆的專屬選股雷達", layout="wide")
-st.title("📊 專屬 AI 策略選股雷達 & 庫存戰情室 (🚀 產業狙擊版)")
+st.title("📊 專屬 AI 策略選股雷達 & 庫存戰情室 (🚀 概念聯集版)")
 
 # ==========================================
 # 💾 雲端資料庫連線
@@ -29,32 +29,35 @@ if 'my_portfolio' not in st.session_state:
     else: st.session_state.my_portfolio = [] 
 
 # ==========================================
+# ⭐ 內建主力概念股資料庫 (可隨時擴充)
+# ==========================================
+CONCEPT_DICT = {
+    "🔥 AI 伺服器/散熱": ["2330", "2317", "2382", "3231", "2356", "3443", "3661", "3017", "2324", "3324", "3013", "3483"],
+    "🍎 蘋果供應鏈": ["2330", "2317", "3008", "2439", "4938", "6153", "3406", "3189", "6269", "2313"],
+    "🚗 電動車/車用電子": ["2317", "2308", "1536", "3665", "6282", "2409", "3481", "1504", "1519", "2201", "2204"],
+    "⚡ 重電與綠能": ["1503", "1504", "1513", "1514", "1519", "6806", "3711", "9958", "3708"],
+    "🛰️ 低軌衛星": ["2314", "3491", "2312", "6271", "3311", "2308", "2412", "3490"],
+    "💰 高股息熱門成分股": ["2603", "2609", "2303", "2454", "2382", "3231", "2356", "3005", "2379", "3034"]
+}
+
+# ==========================================
 # 📡 核心函數區
 # ==========================================
-# ⭐ 升級版獲取名單：同時抓現代碼與其所屬產業
 @st.cache_data(ttl=86400)
 def get_all_tw_stocks_with_group():
     stock_list = []
-    groups = set() # 用來收集所有出現過的產業名稱
-    
+    groups = set() 
     try:
         for code, data in twstock.codes.items():
             if data.type == '股票' and len(code) == 4 and code.isdigit():
                 group_name = data.group
-                # 如果產業名稱空白或不存在，給個預設值
-                if not group_name or str(group_name) == 'nan':
-                    group_name = "未分類"
-                
+                if not group_name or str(group_name) == 'nan': group_name = "未分類"
                 groups.add(group_name)
                 
-                if data.market == '上市':
-                    stock_list.append({"代號": f"{code}.TW", "產業": group_name})
-                elif data.market == '上櫃':
-                    stock_list.append({"代號": f"{code}.TWO", "產業": group_name})
-                    
+                if data.market == '上市': stock_list.append({"代號": f"{code}.TW", "產業": group_name})
+                elif data.market == '上櫃': stock_list.append({"代號": f"{code}.TWO", "產業": group_name})
         return stock_list, sorted(list(groups))
     except:
-        # 如果真的出錯的極端備用方案
         return [{"代號": "2330.TW", "產業": "半導體業"}], ["半導體業"]
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -63,8 +66,7 @@ def get_stock_history(stock_id, period="6mo"):
         try:
             df = yf.Ticker(stock_id).history(period=period)
             if not df.empty and len(df) >= 30: return df
-        except:
-            time.sleep(random.uniform(0.2, 0.5))
+        except: time.sleep(random.uniform(0.2, 0.5))
     raise Exception("Fetch failed")
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -104,7 +106,6 @@ def calculate_indicators(df, kd_days, macd_fast, macd_slow, bb_days, bb_std):
     df['Lower_BB'] = df['Middle_BB'] - (df['STD'] * bb_std)
     return df
 
-# 初始化取得名單與產業類別
 all_stocks_data, all_groups = get_all_tw_stocks_with_group()
 
 # ==========================================
@@ -139,11 +140,16 @@ if use_bb_below_mid:
     bb_days = st.sidebar.number_input("布林(均線)天數", value=20)
     bb_std = st.sidebar.number_input("布林標準差", value=2.0)
 
-# ⭐ 新增：產業類別過濾
+# ⭐ 雙引擎：產業類別與概念類股
 use_group = st.sidebar.checkbox("5. 產業類別過濾", value=False)
 selected_groups = []
 if use_group:
-    selected_groups = st.sidebar.multiselect("請選擇目標產業 (可多選)：", all_groups)
+    selected_groups = st.sidebar.multiselect("選擇目標產業：", all_groups)
+
+use_concept = st.sidebar.checkbox("6. 概念題材過濾 (聯集搜尋)", value=False)
+selected_concepts = []
+if use_concept:
+    selected_concepts = st.sidebar.multiselect("選擇概念題材：", list(CONCEPT_DICT.keys()))
 
 # ==========================================
 # 🚀 主畫面：五頁籤設計
@@ -163,16 +169,28 @@ with tab1:
         passed_stocks = []
         failed_count = 0 
         
-        # 1. 根據排序，準備原始名單
         sorted_data = sorted(all_stocks_data, key=lambda x: x['代號'])
         
-        # 2. 如果有勾選產業，先在本地進行篩選
-        if use_group and len(selected_groups) > 0:
-            filtered_data = [d for d in sorted_data if d['產業'] in selected_groups]
+        # ⭐ 聯集搜尋邏輯 (A OR B)
+        filtered_data = []
+        if use_group or use_concept:
+            # 整理出使用者選擇的所有概念股代碼
+            concept_codes = set()
+            if use_concept:
+                for c in selected_concepts:
+                    concept_codes.update(CONCEPT_DICT.get(c, []))
+            
+            # 開始過濾：符合產業「或」符合概念，都抓進來！
+            for d in sorted_data:
+                stock_code_only = d['代號'].split('.')[0]
+                match_group = use_group and (d['產業'] in selected_groups)
+                match_concept = use_concept and (stock_code_only in concept_codes)
+                
+                if match_group or match_concept:
+                    filtered_data.append(d)
         else:
             filtered_data = sorted_data
             
-        # 3. 根據選定的檔位裁切名單
         if "50檔" in scan_mode: sample_size = 50
         elif "500檔" in scan_mode: sample_size = 500
         else: sample_size = len(filtered_data)
@@ -180,14 +198,16 @@ with tab1:
         stock_database = filtered_data[:sample_size]
         
         if len(stock_database) == 0:
-            st.warning("⚠️ 您選擇的產業中目前沒有可掃描的股票，請確認您的產業設定！")
+            st.warning("⚠️ 查無股票：請確認您勾選的產業或概念題材是否正確！")
         else:
             progress_bar = st.progress(0)
             status_text = st.empty()
             
             for i, item in enumerate(stock_database):
                 stock = item['代號']
+                stock_pure_code = stock.replace('.TW', '').replace('.TWO', '')
                 group = item['產業']
+                
                 progress_bar.progress((i + 1) / len(stock_database))
                 status_text.text(f"📡 正在向 Yahoo 索取 {stock} ({group}) 報價 ({i+1}/{len(stock_database)})...")
                 
@@ -203,17 +223,24 @@ with tab1:
                     if use_macd_below and latest['MACD'] >= 0: continue
                     if use_bb_below_mid and latest['Close'] >= latest['Middle_BB']: continue
                     
-                    # 過關的股票，把產業資訊也加進去
+                    # 辨識這檔股票是因為什麼原因被選中 (產業? 還是某個概念?)
+                    labels = []
+                    if use_group and group in selected_groups: labels.append(group)
+                    if use_concept:
+                        for c_name, c_codes in CONCEPT_DICT.items():
+                            if c_name in selected_concepts and stock_pure_code in c_codes:
+                                labels.append(c_name)
+                    if not labels: labels.append(group) # 預設顯示產業
+                    
                     passed_stocks.append({
-                        "代號": stock.replace('.TW', '').replace('.TWO', ''), 
-                        "產業": group,
+                        "代號": stock_pure_code, 
+                        "族群屬性": " + ".join(labels),
                         "收盤價": round(latest['Close'], 2)
                     })
                 except: pass
             
             status_text.text(f"✅ 掃描完成！")
             
-            st.markdown("### 📝 本次掃描診斷報告")
             col_res1, col_res2, col_res3 = st.columns(3)
             col_res1.metric("🎯 符合條件檔數", f"{len(passed_stocks)} 檔")
             col_res2.metric("🟢 成功取得報價", f"{len(stock_database) - failed_count} 檔")
