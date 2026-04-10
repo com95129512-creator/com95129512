@@ -4,11 +4,11 @@ import pandas as pd
 import time, requests, random, urllib3, urllib.parse, json, gspread
 import xml.etree.ElementTree as ET
 from openai import OpenAI 
-import twstock  # 🆕 導入台灣專屬的本地股票資料庫
+import twstock 
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 st.set_page_config(page_title="老闆的專屬選股雷達", layout="wide")
-st.title("📊 專屬 AI 策略選股雷達 & 庫存戰情室 (🚀 本地名單版)")
+st.title("📊 專屬 AI 策略選股雷達 & 庫存戰情室 (🚀 產業狙擊版)")
 
 # ==========================================
 # 💾 雲端資料庫連線
@@ -29,29 +29,33 @@ if 'my_portfolio' not in st.session_state:
     else: st.session_state.my_portfolio = [] 
 
 # ==========================================
-# 📡 核心函數區 (⭐ 零封鎖：改用 twstock 內建名單)
+# 📡 核心函數區
 # ==========================================
+# ⭐ 升級版獲取名單：同時抓現代碼與其所屬產業
 @st.cache_data(ttl=86400)
-def get_all_tw_stocks():
+def get_all_tw_stocks_with_group():
     stock_list = []
-    fallback_list = ["2330.TW", "2317.TW", "2454.TW", "2382.TW", "2308.TW", "2881.TW", "2882.TW", "2891.TW", "2002.TW", "1216.TW", "2886.TW", "2884.TW", "2885.TW", "2892.TW", "2603.TW"]
+    groups = set() # 用來收集所有出現過的產業名稱
     
     try:
-        # 讀取 twstock 內建的字典檔，完全不需要發送網路請求！
         for code, data in twstock.codes.items():
-            # 過濾：只要 4 碼的「股票」，排除權證、ETF等
             if data.type == '股票' and len(code) == 4 and code.isdigit():
+                group_name = data.group
+                # 如果產業名稱空白或不存在，給個預設值
+                if not group_name or str(group_name) == 'nan':
+                    group_name = "未分類"
+                
+                groups.add(group_name)
+                
                 if data.market == '上市':
-                    stock_list.append(f"{code}.TW")
+                    stock_list.append({"代號": f"{code}.TW", "產業": group_name})
                 elif data.market == '上櫃':
-                    stock_list.append(f"{code}.TWO")
+                    stock_list.append({"代號": f"{code}.TWO", "產業": group_name})
                     
-        if len(stock_list) > 1000: 
-            return stock_list
-        else: 
-            return fallback_list
+        return stock_list, sorted(list(groups))
     except:
-        return fallback_list
+        # 如果真的出錯的極端備用方案
+        return [{"代號": "2330.TW", "產業": "半導體業"}], ["半導體業"]
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_stock_history(stock_id, period="6mo"):
@@ -100,6 +104,9 @@ def calculate_indicators(df, kd_days, macd_fast, macd_slow, bb_days, bb_std):
     df['Lower_BB'] = df['Middle_BB'] - (df['STD'] * bb_std)
     return df
 
+# 初始化取得名單與產業類別
+all_stocks_data, all_groups = get_all_tw_stocks_with_group()
+
 # ==========================================
 # 側邊欄：控制台
 # ==========================================
@@ -132,20 +139,18 @@ if use_bb_below_mid:
     bb_days = st.sidebar.number_input("布林(均線)天數", value=20)
     bb_std = st.sidebar.number_input("布林標準差", value=2.0)
 
+# ⭐ 新增：產業類別過濾
+use_group = st.sidebar.checkbox("5. 產業類別過濾", value=False)
+selected_groups = []
+if use_group:
+    selected_groups = st.sidebar.multiselect("請選擇目標產業 (可多選)：", all_groups)
+
 # ==========================================
 # 🚀 主畫面：五頁籤設計
 # ==========================================
 tab1, tab2, tab3, tab4, tab5 = st.tabs(["📊 雷達掃描", "📰 個股新聞", "📈 歷史回測", "🌙 晨間會議", "💼 我的庫存股"])
 
 with tab1:
-    all_stocks = get_all_tw_stocks()
-    all_stocks_sorted = sorted(all_stocks)
-    
-    if len(all_stocks_sorted) > 1000:
-        st.info(f"🟢 本地名單載入成功：系統內建 {len(all_stocks_sorted)} 檔台股，完全免疫證交所封鎖！")
-    else:
-        st.warning(f"🟡 本地名單載入異常：啟用備用模式。")
-
     col_run, col_clear = st.columns([3, 1])
     with col_run: run_btn = st.button("🚀 啟動掃描 (每次自動清洗舊記憶)", type="primary", use_container_width=True)
     with col_clear:
@@ -158,42 +163,64 @@ with tab1:
         passed_stocks = []
         failed_count = 0 
         
+        # 1. 根據排序，準備原始名單
+        sorted_data = sorted(all_stocks_data, key=lambda x: x['代號'])
+        
+        # 2. 如果有勾選產業，先在本地進行篩選
+        if use_group and len(selected_groups) > 0:
+            filtered_data = [d for d in sorted_data if d['產業'] in selected_groups]
+        else:
+            filtered_data = sorted_data
+            
+        # 3. 根據選定的檔位裁切名單
         if "50檔" in scan_mode: sample_size = 50
         elif "500檔" in scan_mode: sample_size = 500
-        else: sample_size = len(all_stocks_sorted)
+        else: sample_size = len(filtered_data)
             
-        stock_database = all_stocks_sorted[:sample_size]
-        progress_bar = st.progress(0)
-        status_text = st.empty()
+        stock_database = filtered_data[:sample_size]
         
-        for i, stock in enumerate(stock_database):
-            progress_bar.progress((i + 1) / len(stock_database))
-            status_text.text(f"📡 正在向 Yahoo 索取 {stock} 報價 ({i+1}/{len(stock_database)})...")
+        if len(stock_database) == 0:
+            st.warning("⚠️ 您選擇的產業中目前沒有可掃描的股票，請確認您的產業設定！")
+        else:
+            progress_bar = st.progress(0)
+            status_text = st.empty()
             
-            try: df = get_stock_history(stock, "6mo")
-            except:
-                failed_count += 1
-                continue
+            for i, item in enumerate(stock_database):
+                stock = item['代號']
+                group = item['產業']
+                progress_bar.progress((i + 1) / len(stock_database))
+                status_text.text(f"📡 正在向 Yahoo 索取 {stock} ({group}) 報價 ({i+1}/{len(stock_database)})...")
                 
-            try:
-                latest = calculate_indicators(df.copy(), kd_days, macd_fast, macd_slow, bb_days, bb_std).iloc[-1]
-                if use_vol and (latest['Volume'] / 1000) < set_volume: continue
-                if use_kd_below and (latest['K'] > kd_val or latest['D'] > kd_val): continue
-                if use_macd_below and latest['MACD'] >= 0: continue
-                if use_bb_below_mid and latest['Close'] >= latest['Middle_BB']: continue
-                passed_stocks.append({"代號": stock.replace('.TW', '').replace('.TWO', ''), "收盤價": round(latest['Close'], 2)})
-            except: pass
-        
-        status_text.text(f"✅ 掃描完成！")
-        
-        st.markdown("### 📝 本次掃描診斷報告")
-        col_res1, col_res2, col_res3 = st.columns(3)
-        col_res1.metric("🎯 符合條件檔數", f"{len(passed_stocks)} 檔")
-        col_res2.metric("🟢 成功取得報價", f"{len(stock_database) - failed_count} 檔")
-        col_res3.metric("🔴 遭 Yahoo 阻擋", f"{failed_count} 檔")
-        
-        if passed_stocks: st.dataframe(pd.DataFrame(passed_stocks), use_container_width=True)
-        else: st.warning("😅 目前沒有股票符合條件。這可能是條件太嚴苛，或是成功取得報價的股票太少。")
+                try: df = get_stock_history(stock, "6mo")
+                except:
+                    failed_count += 1
+                    continue
+                    
+                try:
+                    latest = calculate_indicators(df.copy(), kd_days, macd_fast, macd_slow, bb_days, bb_std).iloc[-1]
+                    if use_vol and (latest['Volume'] / 1000) < set_volume: continue
+                    if use_kd_below and (latest['K'] > kd_val or latest['D'] > kd_val): continue
+                    if use_macd_below and latest['MACD'] >= 0: continue
+                    if use_bb_below_mid and latest['Close'] >= latest['Middle_BB']: continue
+                    
+                    # 過關的股票，把產業資訊也加進去
+                    passed_stocks.append({
+                        "代號": stock.replace('.TW', '').replace('.TWO', ''), 
+                        "產業": group,
+                        "收盤價": round(latest['Close'], 2)
+                    })
+                except: pass
+            
+            status_text.text(f"✅ 掃描完成！")
+            
+            st.markdown("### 📝 本次掃描診斷報告")
+            col_res1, col_res2, col_res3 = st.columns(3)
+            col_res1.metric("🎯 符合條件檔數", f"{len(passed_stocks)} 檔")
+            col_res2.metric("🟢 成功取得報價", f"{len(stock_database) - failed_count} 檔")
+            col_res3.metric("🔴 遭 Yahoo 阻擋", f"{failed_count} 檔")
+            
+            if passed_stocks: st.dataframe(pd.DataFrame(passed_stocks), use_container_width=True)
+            else: st.warning("😅 目前沒有股票符合條件。這可能是條件太嚴苛，或是成功取得報價的股票太少。")
 
 with tab2:
     st.subheader("🤖 個股深度分析")
