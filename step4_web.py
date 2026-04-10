@@ -4,10 +4,11 @@ import pandas as pd
 import time, requests, random, urllib3, urllib.parse, json, gspread
 import xml.etree.ElementTree as ET
 from openai import OpenAI 
+import twstock  # 🆕 導入台灣專屬的本地股票資料庫
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 st.set_page_config(page_title="老闆的專屬選股雷達", layout="wide")
-st.title("📊 專屬 AI 策略選股雷達 & 庫存戰情室 (🚀 固定名單版)")
+st.title("📊 專屬 AI 策略選股雷達 & 庫存戰情室 (🚀 本地名單版)")
 
 # ==========================================
 # 💾 雲端資料庫連線
@@ -28,30 +29,27 @@ if 'my_portfolio' not in st.session_state:
     else: st.session_state.my_portfolio = [] 
 
 # ==========================================
-# 📡 核心函數區
+# 📡 核心函數區 (⭐ 零封鎖：改用 twstock 內建名單)
 # ==========================================
 @st.cache_data(ttl=86400)
 def get_all_tw_stocks():
     stock_list = []
-    fallback_list = ["2330.TW", "2317.TW", "2454.TW", "2382.TW", "2308.TW", "2881.TW", "2882.TW", "2891.TW", "2002.TW", "1216.TW", "2886.TW", "2884.TW", "2885.TW", "2892.TW", "2603.TW", "2880.TW", "2887.TW", "2883.TW", "5880.TW", "2890.TW", "2303.TW", "2609.TW", "2615.TW", "2412.TW", "3045.TW", "4904.TW", "2912.TW", "2357.TW", "2379.TW", "2301.TW", "2324.TW", "2353.TW", "2356.TW", "3231.TW", "2352.TW", "2377.TW", "2395.TW", "2408.TW", "2409.TW", "3481.TW", "2344.TW", "2404.TW", "2337.TW", "2338.TW", "2313.TW", "2362.TW", "2371.TW", "2385.TW", "2392.TW", "2449.TW"]
+    fallback_list = ["2330.TW", "2317.TW", "2454.TW", "2382.TW", "2308.TW", "2881.TW", "2882.TW", "2891.TW", "2002.TW", "1216.TW", "2886.TW", "2884.TW", "2885.TW", "2892.TW", "2603.TW"]
     
     try:
-        twse_url = "https://api.allorigins.win/raw?url=" + urllib.parse.quote("https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL")
-        tpex_url = "https://api.allorigins.win/raw?url=" + urllib.parse.quote("https://www.tpex.org.tw/openapi/v1/tpex_mainboard_quotes")
-        
-        res_twse = requests.get(twse_url, timeout=15)
-        if res_twse.status_code == 200:
-            for item in res_twse.json():
-                if len(item.get('Code', '')) == 4 and item.get('Code', '').isdigit(): stock_list.append(f"{item.get('Code')}.TW")
-                
-        res_tpex = requests.get(tpex_url, timeout=15)
-        if res_tpex.status_code == 200:
-            for item in res_tpex.json():
-                code = item.get('SecuritiesCompanyCode', item.get('Code', ''))
-                if len(code) == 4 and code.isdigit(): stock_list.append(f"{code}.TWO")
-        
-        if len(stock_list) > 1000: return stock_list
-        else: return fallback_list
+        # 讀取 twstock 內建的字典檔，完全不需要發送網路請求！
+        for code, data in twstock.codes.items():
+            # 過濾：只要 4 碼的「股票」，排除權證、ETF等
+            if data.type == '股票' and len(code) == 4 and code.isdigit():
+                if data.market == '上市':
+                    stock_list.append(f"{code}.TW")
+                elif data.market == '上櫃':
+                    stock_list.append(f"{code}.TWO")
+                    
+        if len(stock_list) > 1000: 
+            return stock_list
+        else: 
+            return fallback_list
     except:
         return fallback_list
 
@@ -62,7 +60,6 @@ def get_stock_history(stock_id, period="6mo"):
             df = yf.Ticker(stock_id).history(period=period)
             if not df.empty and len(df) >= 30: return df
         except:
-            # 延長休息時間，避免再被鎖定
             time.sleep(random.uniform(0.2, 0.5))
     raise Exception("Fetch failed")
 
@@ -142,13 +139,12 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs(["📊 雷達掃描", "📰 個股新聞"
 
 with tab1:
     all_stocks = get_all_tw_stocks()
-    # ⭐ 核心更新：將股票代號進行排序，確保名單「鎖死」，不再隨機跳動
     all_stocks_sorted = sorted(all_stocks)
     
     if len(all_stocks_sorted) > 1000:
-        st.info(f"🟢 跨國跳板連線成功：已載入 {len(all_stocks_sorted)} 檔台股清單。")
+        st.info(f"🟢 本地名單載入成功：系統內建 {len(all_stocks_sorted)} 檔台股，完全免疫證交所封鎖！")
     else:
-        st.warning(f"🟡 跨國跳板受阻：已自動啟用備用模式。")
+        st.warning(f"🟡 本地名單載入異常：啟用備用模式。")
 
     col_run, col_clear = st.columns([3, 1])
     with col_run: run_btn = st.button("🚀 啟動掃描 (每次自動清洗舊記憶)", type="primary", use_container_width=True)
@@ -162,17 +158,11 @@ with tab1:
         passed_stocks = []
         failed_count = 0 
         
-        # ⭐ 核心更新：不再使用 random.sample，而是直接「鎖定」最前面的名單
-        if "50檔" in scan_mode:
-            sample_size = 50
-        elif "500檔" in scan_mode:
-            sample_size = 500
-        else:
-            sample_size = len(all_stocks_sorted)
+        if "50檔" in scan_mode: sample_size = 50
+        elif "500檔" in scan_mode: sample_size = 500
+        else: sample_size = len(all_stocks_sorted)
             
-        # 鎖定名單（取排序後的前 N 檔）
         stock_database = all_stocks_sorted[:sample_size]
-        
         progress_bar = st.progress(0)
         status_text = st.empty()
         
@@ -180,8 +170,7 @@ with tab1:
             progress_bar.progress((i + 1) / len(stock_database))
             status_text.text(f"📡 正在向 Yahoo 索取 {stock} 報價 ({i+1}/{len(stock_database)})...")
             
-            try:
-                df = get_stock_history(stock, "6mo")
+            try: df = get_stock_history(stock, "6mo")
             except:
                 failed_count += 1
                 continue
@@ -203,10 +192,8 @@ with tab1:
         col_res2.metric("🟢 成功取得報價", f"{len(stock_database) - failed_count} 檔")
         col_res3.metric("🔴 遭 Yahoo 阻擋", f"{failed_count} 檔")
         
-        if passed_stocks: 
-            st.dataframe(pd.DataFrame(passed_stocks), use_container_width=True)
-        else: 
-            st.warning("😅 目前沒有股票符合條件。這可能是條件太嚴苛，或是成功取得報價的股票太少。")
+        if passed_stocks: st.dataframe(pd.DataFrame(passed_stocks), use_container_width=True)
+        else: st.warning("😅 目前沒有股票符合條件。這可能是條件太嚴苛，或是成功取得報價的股票太少。")
 
 with tab2:
     st.subheader("🤖 個股深度分析")
